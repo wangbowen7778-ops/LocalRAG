@@ -1,0 +1,10 @@
+PLACEHOLDER
+==========
+
+这是一个占位文件。请将真实的 icon.ico (256x256) 替换此占位。
+
+可以：
+1. 删除此文件并提供 icon.ico
+2. 或保留此文件，electron-builder 在找不到 icon.ico 时会使用默认 Electron 图标
+
+占位符已就绪。

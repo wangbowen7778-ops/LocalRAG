@@ -1,0 +1,65 @@
+{
+  "name": "localrag",
+  "version": "1.1.5",
+  "description": "LocalRAG - 本地知识库 RAG 桌面应用",
+  "main": "dist/main/main.js",
+  "author": "LocalRAG Team",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c blue,green \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && tsc -p tsconfig.main.json && cross-env NODE_ENV=development electron .",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:renderer && npm run build:main",
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings 0",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,json,md}\"",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "rebuild:keytar": "npx @electron/rebuild --module-dir node_modules/keytar --only keytar",
+    "postinstall": "echo \"Run npm run rebuild:keytar if Electron fails to load keytar.\""
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "electron-log": "^5.1.5",
+    "iconv-lite": "^0.6.3",
+    "keytar": "^7.9.0",
+    "mammoth": "^1.8.0",
+    "marked": "^12.0.2",
+    "pdf-parse": "^1.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sql.js": "^1.11.0",
+    "uuid": "^9.0.1",
+    "vectra": "^0.10.1",
+    "wink-bm25-text-search": "^3.1.2",
+    "wink-eng-lite-web-model": "^1.8.1",
+    "wink-nlp": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^28.3.0",
+    "electron-builder": "^24.13.3",
+    "eslint": "^8.57.0",
+    "postcss": "^8.4.38",
+    "prettier": "^3.2.5",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "wait-on": "^7.2.0"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "build": {
+    "extends": "./electron-builder.json"
+  }
+}
