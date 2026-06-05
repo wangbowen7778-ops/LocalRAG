@@ -33,6 +33,13 @@ const api = {
       ipcRenderer.invoke(IPC.DOC_UPLOAD, { kbId, filePath }),
     delete: (docId: string): Promise<void> => ipcRenderer.invoke(IPC.DOC_DELETE, docId),
     reindex: (docId: string): Promise<void> => ipcRenderer.invoke(IPC.DOC_REINDEX, docId),
+    ocrTest: (): Promise<{
+      ok: boolean;
+      text: string;
+      latencyMs: number;
+      modelPath: string;
+      error?: string;
+    }> => ipcRenderer.invoke(IPC.DOC_OCR_TEST),
   },
 
   chat: {

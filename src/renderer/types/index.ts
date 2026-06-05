@@ -41,6 +41,13 @@ export interface ElectronApi {
     upload(kbId: string, filePath: string): Promise<Document>;
     delete(docId: string): Promise<void>;
     reindex(docId: string): Promise<void>;
+    ocrTest(): Promise<{
+      ok: boolean;
+      text: string;
+      latencyMs: number;
+      modelPath: string;
+      error?: string;
+    }>;
   };
   chat: {
     send(p: {

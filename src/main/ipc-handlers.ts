@@ -35,7 +35,7 @@ import {
   getUserDataDir,
 } from './storage';
 import { SecureStore } from './secure-store';
-import { processAndIndexDoc, deleteDocChunks, resolveEmbeddingProvider } from './document-processor';
+import { processAndIndexDoc, deleteDocChunks, resolveEmbeddingProvider, runOcrSelfTest } from './document-processor';
 import { vectorSearch, deleteCollection } from './vector-store';
 import { chatStream, embedText } from './api-client';
 import type { ProviderConfig, DocProgressEvent, ChatTokenEvent, Citation } from '../shared/types';
@@ -172,13 +172,18 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
     if (!doc) throw new ApiError('E_NOT_FOUND', '文档不存在');
     deleteDocChunks(doc.kbId, docId);
     deleteDoc(docId);
-    updateKBStats(doc.kbId, -1, -doc.chunkCount);
+    // docCount / chunkCount 只在上传成功时 +1（见 DOC_UPLOAD 成功分支）。
+    // 如果 doc 状态为 failed / processing，chunkCount=0，从未为 docCount 做过贡献，
+    // 删除时再 -1 就会把计数拉到负数。这里只在 chunkCount>0 时回退 docCount。
+    updateKBStats(doc.kbId, doc.chunkCount > 0 ? -1 : 0, -doc.chunkCount);
   });
 
   safeHandle(IPC.DOC_REINDEX, async (_docId: string) => {
     // TODO: 重新解析 + 删除旧向量 + 写入新向量
     throw new ApiError('E_INTERNAL', '尚未实现');
   });
+
+  safeHandle(IPC.DOC_OCR_TEST, async () => runOcrSelfTest());
 
   // ===== Chat =====
   safeHandle(
@@ -212,6 +217,9 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
       // 4. Embedding + 检索（embedding 用专门的 embeddingProvider，可能与 chat 不同）
       const settings = getSettings();
       const topK = payload.topK ?? settings.topK;
+      // 引用分数阈值：低于此分的 chunk 既不进 LLM 上下文、也不展示给用户。
+      // 解决「3 个相似文档都被引用」问题——只把真正相关的喂给 LLM。
+      const scoreThreshold = settings.citationScoreThreshold ?? 0.4;
       let citations: Citation[] = [];
       let contextText = '';
 
@@ -220,14 +228,25 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
         const embedKey = await SecureStore.getApiKey(embedProvider.id);
         if (!embedKey) throw new Error('embedding Provider 缺少 API Key');
         const qvec = await embedText(embedProvider, embedKey, payload.content);
-        const chunks = await vectorSearch(payload.kbId, qvec, topK);
+        const rawChunks = await vectorSearch(payload.kbId, qvec, topK);
+        // 阈值过滤（threshold=0 时不过滤）
+        const chunks =
+          scoreThreshold > 0 ? rawChunks.filter((c) => c.score >= scoreThreshold) : rawChunks;
         citations = chunks.map((c) => ({
           docId: c.docId,
           filename: c.filename,
           chunk: c.text.slice(0, 200),
           score: c.score,
         }));
-        contextText = chunks.map((c, i) => `[#${i + 1} ${c.filename}]\n${c.text}`).join('\n\n');
+        if (chunks.length > 0) {
+          contextText = chunks
+            .map((c, i) => `[#${i + 1} ${c.filename}]\n${c.text}`)
+            .join('\n\n');
+        } else {
+          // 全部被阈值过滤掉——明确告诉 LLM 没找到相关上下文，让它走通识回答，
+          // 而不是把所有低分 chunk 塞进去污染回答。
+          contextText = '（未检索到与本问题相关的文档内容）';
+        }
       } catch (e) {
         console.warn('检索失败，继续无上下文回答', e);
       }

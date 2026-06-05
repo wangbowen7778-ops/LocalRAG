@@ -69,9 +69,14 @@ export interface Settings {
   /** 用于文档 embedding 与检索向量化的 Provider；留空则用 defaultProviderId。
    *  当 Chat Provider 不支持 embedding（如 DeepSeek）时，可指定一个支持 embedding 的 Provider。 */
   embeddingProviderId?: string;
+  /** 对扫描件 / 图片型 PDF 自动 fallback 到 OCR（tesseract.js）；默认关闭。 */
+  enableOcr?: boolean;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
+  /** 余弦相似度阈值。检索结果中分数 < 此值的 chunk 不进 LLM 上下文、也不展示为引用。
+   *  设为 0 关闭过滤；OpenAI text-embedding-3 相关文档通常 0.5+。 */
+  citationScoreThreshold: number;
   temperature: number;
   language: 'zh-CN' | 'en-US';
   autoLaunch: boolean;
@@ -87,7 +92,7 @@ export interface AppInfo {
 
 export interface DocProgressEvent {
   docId: string;
-  stage: 'parsing' | 'embedding' | 'storing' | 'done';
+  stage: 'parsing' | 'ocr' | 'embedding' | 'storing' | 'done';
   percent: number;
   message?: string;
 }

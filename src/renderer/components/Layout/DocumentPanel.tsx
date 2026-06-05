@@ -72,7 +72,7 @@ export function DocumentPanel({ activeKB, docs, progressMap, onUpload, onDelete 
                       />
                     </div>
                     <span className="text-xs text-slate-500">
-                      {p?.stage === 'parsing' ? '解析' : p?.stage === 'embedding' ? 'Embedding' : p?.stage === 'storing' ? '存储' : '完成'}
+                      {p?.stage === 'parsing' ? '解析' : p?.stage === 'ocr' ? 'OCR' : p?.stage === 'embedding' ? 'Embedding' : p?.stage === 'storing' ? '存储' : '完成'}
                     </span>
                   </>
                 ) : (

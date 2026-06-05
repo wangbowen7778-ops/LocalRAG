@@ -30,6 +30,7 @@ export const api = {
   },
   uploadDoc: (kbId: string, filePath: string) => window.api.doc.upload(kbId, filePath),
   deleteDoc: (id: string) => window.api.doc.delete(id),
+  ocrTest: () => window.api.doc.ocrTest(),
 
   // Chat
   sendChat: window.api.chat.send,

@@ -99,11 +99,12 @@ interface Document {
 ```ts
 interface DocProgressEvent {
   docId: string;
-  stage: 'parsing' | 'embedding' | 'storing' | 'done';
+  stage: 'parsing' | 'ocr' | 'embedding' | 'storing' | 'done';
   percent: number; // 0-100
   message?: string;
 }
 ```
+> v1.1.6 起新增 `ocr` 阶段：扫描件 PDF 在「设置 → 常规」开启「对扫描件 PDF 启用 OCR」时会上报 OCR 进度。
 
 ### `doc.delete(docId)`
 - **参数**：`docId: string`
@@ -112,6 +113,20 @@ interface DocProgressEvent {
 ### `doc.reindex(docId)`
 - **参数**：`docId: string`
 - **返回**：`void`
+
+### `doc.ocrTest()`（v1.1.6+）
+- **参数**：无
+- **返回**：
+```ts
+interface OcrTestResult {
+  ok: boolean;
+  text: string;      // 识别到的文本（最长显示 60 字）
+  latencyMs: number; // 总耗时（含首次模型下载）
+  modelPath: string; // tesseract 模型缓存目录
+  error?: string;
+}
+```
+- **说明**：独立验证 OCR 管线是否可用。在设置页「测试 OCR」按钮处使用，不依赖任何真实 PDF——直接用 `@napi-rs/canvas` 画一张已知文字的测试图丢给 tesseract worker。
 
 ## 5. 对话 API（`chat`）
 
@@ -137,6 +152,7 @@ interface ChatTokenEvent {
   done: boolean;
 }
 ```
+> v1.1.6 起：检索结果会按 `Settings.citationScoreThreshold`（默认 0.4）过滤；低于阈值的 chunk 不会推送到 `chat:citation` 事件，也不会出现在 LLM 上下文中。全部被过滤时，LLM 会收到「未检索到相关文档」并基于通识回答。
 
 ### `chat.sessions(kbId?)`
 - **参数**：`kbId?: string`
@@ -180,7 +196,10 @@ interface ProviderConfig {
   label: string;         // 显示名
   baseUrl: string;
   chatModel: string;
+  /** 用于生成向量（/embeddings） */
   embeddingModel: string;
+  /** 推理 / 思考模型（可选，用于回答阶段；v1.1.5+ 独立于 embeddingModel） */
+  reasoningModel?: string;
   hasApiKey: boolean;
 }
 ```
@@ -194,9 +213,16 @@ interface ProviderConfig {
 - **参数**：`id: string`
 - **返回**：`void`
 
-### `provider.test(payload)`
-- **参数**：`{ id: string; apiKey?: string }`
+### `provider.test(payload)`（v1.1.3+ 改用入参配置直接探活）
+- **参数**：
+```ts
+{
+  config: Omit<ProviderConfig, 'hasApiKey'>;
+  apiKey?: string;
+}
+```
 - **返回**：`{ ok: boolean; latencyMs: number; message: string }`
+- **说明**：使用入参的 config 调 `/chat/completions`（max_tokens=1）做探活，**不再要求 Provider 先入库**——允许在「保存前」测试连通性。
 
 ## 7. 设置 API（`setting`）
 
@@ -207,9 +233,18 @@ interface Settings {
   theme: 'light' | 'dark' | 'system';
   defaultProviderId?: string;
   defaultModel?: string;
+  /** 用于文档 embedding 与检索向量化的 Provider；留空则用 defaultProviderId。
+   *  当 Chat Provider 不支持 embedding（如 DeepSeek 没有 /embeddings 端点）时，
+   *  可指定一个支持 embedding 的 Provider。v1.1.5+ */
+  embeddingProviderId?: string;
+  /** 对扫描件 / 图片型 PDF 自动 fallback 到 OCR（tesseract.js）；默认关闭。v1.1.6+ */
+  enableOcr?: boolean;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
+  /** 余弦相似度阈值（0-1，默认 0.4）。检索结果中 score < 此值的 chunk 不进 LLM 上下文、也不展示为引用。
+   *  设为 0 关闭过滤；OpenAI text-embedding-3 相关片段通常 0.5+。v1.1.6+ */
+  citationScoreThreshold: number;
   temperature: number;
   language: 'zh-CN' | 'en-US';
   autoLaunch: boolean;

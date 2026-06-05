@@ -17,6 +17,7 @@ export const IPC = {
   DOC_DELETE: 'doc:delete',
   DOC_REINDEX: 'doc:reindex',
   DOC_PICK: 'doc:pick', // 打开文件选择对话框
+  DOC_OCR_TEST: 'doc:ocrTest', // 测试 OCR 管线（独立于 PDF 传不传）
 
   // 对话
   CHAT_SEND: 'chat:send',
@@ -70,7 +71,7 @@ export const DEFAULT_TOP_K = 5;
 
 // 应用名称
 export const APP_NAME = 'LocalRAG';
-export const APP_VERSION = '1.1.5';
+export const APP_VERSION = '1.1.6';
 
 // Provider 预设
 export const PROVIDER_PRESETS = {

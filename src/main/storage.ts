@@ -22,9 +22,11 @@ const DEFAULT_SETTINGS: Settings = {
   chunkSize: 500,
   chunkOverlap: 50,
   topK: 5,
+  citationScoreThreshold: 0.4,
   temperature: 0.7,
   language: 'zh-CN',
   autoLaunch: false,
+  enableOcr: false,
 };
 
 // ===== 基础工具 =====
@@ -203,6 +205,22 @@ export async function initStorage(): Promise<void> {
       );
     }
   }
+
+  // 迁移：修复 docCount / chunkCount 计数错误。
+  // 旧版本 DOC_DELETE 在删除 failed / processing 状态的文档时也会 -1，
+  // 但这些文档从未在 DOC_UPLOAD 成功分支 +1 过，导致计数变负数。
+  // 启动时按 documents 表实际值重算一次（幂等，开销可忽略）。
+  prep(`
+    UPDATE knowledge_bases SET
+      doc_count = COALESCE((
+        SELECT COUNT(*) FROM documents
+        WHERE kb_id = knowledge_bases.id AND status = 'ready'
+      ), 0),
+      chunk_count = COALESCE((
+        SELECT SUM(chunk_count) FROM documents
+        WHERE kb_id = knowledge_bases.id AND status = 'ready'
+      ), 0)
+  `).run();
 }
 
 // ===== Settings =====

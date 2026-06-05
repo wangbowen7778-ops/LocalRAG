@@ -250,6 +250,49 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 Embedding 是「把文本转成向量数字」的能力，用于相似度检索，与 Chat 回答问题是不同的接口。
                 DeepSeek 只提供 Chat，没有 Embedding 接口——如果你只用 DeepSeek，请新增一个 OpenAI / 通义千问 Provider 并在此选择它作为 Embedding Provider。
               </div>
+              <Row label="OCR 识别（扫描件）">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableOcr ?? false}
+                    onChange={(e) => setGeneral((g) => ({ ...g, enableOcr: e.target.checked }))}
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    对扫描件 PDF 自动 OCR
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                开启后，纯文字提取失败的 PDF（扫描件 / 图片型）会自动 fallback 到本地 OCR（tesseract.js）。
+                首次使用需联网下载中文 + 英文语言模型（~23MB），之后离线可用，识别 1-3 秒/页。
+                关闭则保持纯文本提取，不下载模型、不占内存。
+              </div>
+              <div className="flex items-center gap-2 pl-1">
+                <button
+                  onClick={async () => {
+                    toast('info', '正在跑 OCR 自检（首次会下载 ~23MB 模型）...');
+                    try {
+                      const r = await api.ocrTest();
+                      if (r.ok) {
+                        toast(
+                          'success',
+                          `OCR 正常 (${r.latencyMs}ms)：${r.text.slice(0, 60) || '（识别为空）'}`,
+                        );
+                      } else {
+                        toast('error', `OCR 失败：${r.error || '未知错误'}（${r.latencyMs}ms）`);
+                      }
+                    } catch (e: any) {
+                      toast('error', `OCR 自检调用失败：${e?.message || JSON.stringify(e)}`);
+                    }
+                  }}
+                  className="text-xs px-3 py-1 rounded border border-primary-500 text-primary-500 hover:bg-primary-50"
+                >
+                  测试 OCR
+                </button>
+                <span className="text-xs text-slate-500">
+                  独立验证 OCR 管线（不依赖 PDF）
+                </span>
+              </div>
               <Row label="Chunk Size">
                 <input
                   type="number"
@@ -280,6 +323,29 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                   className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 />
               </Row>
+              <Row label="引用分数阈值">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={general.citationScoreThreshold ?? 0.4}
+                    onChange={(e) =>
+                      setGeneral((g) => ({ ...g, citationScoreThreshold: +e.target.value }))
+                    }
+                    className="w-24"
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300 w-10 text-right">
+                    {(general.citationScoreThreshold ?? 0.4).toFixed(2)}
+                  </span>
+                </div>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                余弦相似度阈值。检索结果中分数低于此值的片段不会喂给 LLM、也不会展示为引用。
+                设为 0 关闭过滤；OpenAI / 多数 embedding 模型，相关片段通常 0.5+。
+                多个相似文档都引用了？把阈值拉高到 0.5-0.6 一般就能解决。
+              </div>
               <Row label="Temperature">
                 <input
                   type="number"
