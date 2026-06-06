@@ -28,7 +28,9 @@ const api = {
 
   doc: {
     list: (kbId: string): Promise<Document[]> => ipcRenderer.invoke(IPC.DOC_LIST, kbId),
-    pick: (): Promise<string | null> => ipcRenderer.invoke(IPC.DOC_PICK),
+    chunks: (kbId: string, docId: string): Promise<{ chunkIndex: number; text: string }[]> =>
+      ipcRenderer.invoke(IPC.DOC_CHUNKS, { kbId, docId }),
+    pick: (): Promise<string[] | null> => ipcRenderer.invoke(IPC.DOC_PICK),
     upload: (kbId: string, filePath: string): Promise<Document> =>
       ipcRenderer.invoke(IPC.DOC_UPLOAD, { kbId, filePath }),
     delete: (docId: string): Promise<void> => ipcRenderer.invoke(IPC.DOC_DELETE, docId),
@@ -45,12 +47,14 @@ const api = {
   chat: {
     send: (payload: {
       kbId: string;
+      kbIds?: string[];
       sessionId?: string;
       content: string;
       providerId: string;
       model: string;
       temperature?: number;
       topK?: number;
+      mode?: 'simple' | 'agent';
     }): Promise<Session> => ipcRenderer.invoke(IPC.CHAT_SEND, payload),
     sessions: (kbId?: string): Promise<Session[]> => ipcRenderer.invoke(IPC.CHAT_SESSIONS, kbId),
     messages: (sessionId: string): Promise<Message[]> =>

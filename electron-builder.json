@@ -6,6 +6,10 @@
     "output": "release",
     "buildResources": "resources"
   },
+  "npmRebuild": false,
+  "electronDownload": {
+    "mirror": "https://registry.npmmirror.com/-/binary/electron/"
+  },
   "files": [
     "dist/**/*",
     "package.json"
@@ -25,7 +29,8 @@
       }
     ],
     "icon": "resources/icon.ico",
-    "artifactName": "${productName}-Setup-${version}.${ext}"
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "signAndEditExecutable": false
   },
   "nsis": {
     "oneClick": false,

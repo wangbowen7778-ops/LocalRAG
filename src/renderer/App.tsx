@@ -6,9 +6,11 @@ import { Sidebar } from './components/Layout/Sidebar';
 import { ChatArea } from './components/Layout/ChatArea';
 import { DocumentPanel } from './components/Layout/DocumentPanel';
 import { SettingsDialog } from './components/Settings/SettingsDialog';
+import { ChunkViewerDialog, type DocChunk } from './components/Layout/ChunkViewerDialog';
 import { useKnowledgeBase } from './hooks/useKnowledgeBase';
 import { useSettings } from './hooks/useSettings';
 import { onToast } from './services/electronAPI';
+import type { Document } from './types';
 
 interface ToastItem {
   id: number;
@@ -22,6 +24,27 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [docPanelOpen, setDocPanelOpen] = useState(true);
+  const [chunksDoc, setChunksDoc] = useState<Document | null>(null);
+  const [chunksData, setChunksData] = useState<DocChunk[] | null>(null);
+  const [chunksLoading, setChunksLoading] = useState(false);
+
+  // Agentic RAG 状态
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // 默认值跟随 settings.enableAgent；用户可在 ChatArea 切换
+  const [agentMode, setAgentMode] = useState(false);
+  useEffect(() => {
+    if (settings.settings) setAgentMode(settings.settings.enableAgent ?? false);
+  }, [settings.settings?.enableAgent]);
+
+  const toggleSelectKB = (id: string) => {
+    setSelectedIds((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
 
   // 全局 toast 订阅
   useEffect(() => {
@@ -32,24 +55,40 @@ export default function App() {
     });
   }, []);
 
-  // 首次启动：未配置 Provider 时弹出设置
+  // 首次启动：数据加载完且没有任何 Provider 配过 API Key 时弹出设置
+  // 注意：必须等 loaded=true 再判断，否则初始空数组就会误触发弹窗
   useEffect(() => {
-    if (settings.providers.length === 0) {
+    if (!settings.loaded) return;
+    if (!settings.providers.some((p) => p.hasApiKey)) {
       setSettingsOpen(true);
     }
-  }, [settings.providers.length]);
+  }, [settings.loaded, settings.providers]);
 
   return (
     <div className="h-screen w-screen flex bg-slate-50 dark:bg-surface-dark text-slate-900 dark:text-slate-100 overflow-hidden">
       <Sidebar
         kbs={kb.kbs}
         activeKB={kb.activeKB}
-        onSelect={(selected) => kb.setActiveKB(selected)}
+        onSelect={(selected) => {
+          kb.setActiveKB(selected);
+          // 单选切换时也重置多选
+          if (multiSelectMode) {
+            setMultiSelectMode(false);
+            setSelectedIds(new Set());
+          }
+        }}
         onCreate={async (name, description) => (await kb.create(name, description)) ?? undefined}
         onDelete={kb.remove}
         onRename={kb.rename}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenDataDir={() => window.api.app.openDataDir()}
+        multiSelectMode={multiSelectMode}
+        onToggleMultiSelect={() => {
+          setMultiSelectMode((m) => !m);
+          if (multiSelectMode) setSelectedIds(new Set());
+        }}
+        selectedIds={selectedIds}
+        onToggleKB={toggleSelectKB}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -80,6 +119,15 @@ export default function App() {
               activeKB={kb.activeKB}
               providers={settings.providers}
               onNeedProvider={() => setSettingsOpen(true)}
+              agentMode={agentMode}
+              onToggleAgentMode={() => setAgentMode((m) => !m)}
+              kbIds={
+                multiSelectMode && selectedIds.size > 0
+                  ? Array.from(selectedIds)
+                  : kb.activeKB
+                  ? [kb.activeKB.id]
+                  : []
+              }
             />
           </div>
           {docPanelOpen && (
@@ -89,10 +137,29 @@ export default function App() {
               progressMap={kb.progressMap}
               onUpload={() => kb.activeKB && kb.upload(kb.activeKB.id)}
               onDelete={kb.removeDoc}
+              onViewChunks={async (d) => {
+                setChunksDoc(d);
+                setChunksData(null);
+                setChunksLoading(true);
+                const cs = await kb.getDocChunks(d.id);
+                setChunksData(cs);
+                setChunksLoading(false);
+              }}
             />
           )}
         </main>
       </div>
+
+      <ChunkViewerDialog
+        open={chunksDoc !== null}
+        doc={chunksDoc}
+        chunks={chunksData}
+        loading={chunksLoading}
+        onClose={() => {
+          setChunksDoc(null);
+          setChunksData(null);
+        }}
+      />
 
       <SettingsDialog
         key={`settings-${settingsOpen}-${settings.providers.length}-${settings.providers.map((p) => p.id).join('|')}`}

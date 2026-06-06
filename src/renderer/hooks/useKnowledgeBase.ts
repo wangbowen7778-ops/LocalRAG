@@ -90,15 +90,34 @@ export function useKnowledgeBase() {
   };
 
   const upload = async (kbId: string) => {
-    const doc = await api.pickAndUpload(kbId);
-    if (doc) {
-      toast('info', `已加入队列：${doc.filename}`);
-      if (activeKB?.id === kbId) {
-        const list = (await safeCall(() => api.listDocs(kbId), '加载文档失败')) ?? [];
-        setDocs(list);
-      }
+    const fps = await window.api.doc.pick();
+    if (!fps || fps.length === 0) return [];
+
+    // 立即并发提交：每个 doc 写一条 status=pending 记录就返回，1000 个文件也在秒级完成
+    // 重活（解析/OCR/Embedding）由主进程上传队列全局限并发（3）慢慢跑
+    const registered = await Promise.all(
+      fps.map((fp) =>
+        safeCall(() => window.api.doc.upload(kbId, fp), `上传失败：${fp.split(/[\\/]/).pop()}`),
+      ),
+    );
+    const ok = registered.filter((d): d is Document => d !== null);
+    if (ok.length === 0) return [];
+
+    toast(
+      'info',
+      ok.length === 1
+        ? `已加入队列：${ok[0].filename}`
+        : `已加入队列：${ok.length} 个文档（后台异步处理）`,
+    );
+
+    // 立即刷一次列表——所有 pending 文档瞬间可见
+    if (activeKB?.id === kbId) {
+      const list = (await safeCall(() => api.listDocs(kbId), '加载文档失败')) ?? [];
+      setDocs(list);
     }
-    return doc;
+    await refreshKBs();
+
+    return ok;
   };
 
   const removeDoc = async (docId: string) => {
@@ -108,6 +127,11 @@ export function useKnowledgeBase() {
       setDocs(list);
       await refreshKBs();
     }
+  };
+
+  const getDocChunks = async (docId: string) => {
+    if (!activeKB) return [];
+    return safeCall(() => api.getDocChunks(activeKB.id, docId), '加载分块失败') ?? [];
   };
 
   return {
@@ -122,6 +146,7 @@ export function useKnowledgeBase() {
     rename,
     upload,
     removeDoc,
+    getDocChunks,
     refresh: refreshKBs,
   };
 }

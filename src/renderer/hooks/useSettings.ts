@@ -8,11 +8,13 @@ import type { Settings, ProviderConfig } from '../types';
 export function useSettings() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
     const [s, p] = await Promise.all([api.getSettings(), api.listProviders()]);
     setSettings(s);
     setProviders(p);
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
@@ -45,5 +47,5 @@ export function useSettings() {
     }
   };
 
-  return { settings, providers, update, refresh };
+  return { settings, providers, loaded, update, refresh };
 }

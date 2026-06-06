@@ -10,9 +10,17 @@ interface Props {
   progressMap: Record<string, DocProgressEvent>;
   onUpload: () => void;
   onDelete: (docId: string) => void;
+  onViewChunks: (doc: Document) => void;
 }
 
-export function DocumentPanel({ activeKB, docs, progressMap, onUpload, onDelete }: Props) {
+export function DocumentPanel({
+  activeKB,
+  docs,
+  progressMap,
+  onUpload,
+  onDelete,
+  onViewChunks,
+}: Props) {
   if (!activeKB) {
     return (
       <div className="w-72 border-l border-slate-200 dark:border-slate-700 p-4 text-sm text-slate-500 flex items-center justify-center">
@@ -27,11 +35,28 @@ export function DocumentPanel({ activeKB, docs, progressMap, onUpload, onDelete 
         <span className="text-sm font-semibold">文档</span>
         <button
           onClick={onUpload}
+          title="可一次选择多个文件（PDF / DOCX / MD / TXT）"
           className="text-xs px-2 py-1 rounded bg-primary-500 text-white hover:bg-primary-600"
         >
           + 上传
         </button>
       </div>
+
+      {(() => {
+        const pending = docs.filter(
+          (d) => d.status === 'pending' || d.status === 'processing',
+        ).length;
+        return (
+          pending > 0 && (
+            <div className="px-3 py-1.5 border-b border-slate-200 dark:border-slate-700 text-xs text-slate-500 flex items-center gap-2">
+              <LoadingSpinner size={10} />
+              <span>
+                {pending} 个文档待处理（后台异步，关闭应用会中断）
+              </span>
+            </div>
+          )
+        );
+      })()}
 
       <div className="flex-1 overflow-y-auto p-2 space-y-2">
         {docs.length === 0 && (
@@ -39,6 +64,8 @@ export function DocumentPanel({ activeKB, docs, progressMap, onUpload, onDelete 
             暂无文档
             <br />
             支持 PDF / DOCX / MD / TXT
+            <br />
+            可一次选多个
           </div>
         )}
         {docs.map((d) => {
@@ -52,14 +79,25 @@ export function DocumentPanel({ activeKB, docs, progressMap, onUpload, onDelete 
                 <div className="text-sm truncate flex-1" title={d.filename}>
                   {d.filename}
                 </div>
-                <button
-                  onClick={() => {
-                    if (confirm(`删除「${d.filename}」？`)) onDelete(d.id);
-                  }}
-                  className="text-xs text-red-500 hover:text-red-700 ml-2"
-                >
-                  ×
-                </button>
+                <div className="flex items-center gap-2 ml-2">
+                  {d.status === 'ready' && (
+                    <button
+                      onClick={() => onViewChunks(d)}
+                      title="查看已向量化的分块"
+                      className="text-xs text-slate-500 hover:text-primary-500"
+                    >
+                      片段
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      if (confirm(`删除「${d.filename}」？`)) onDelete(d.id);
+                    }}
+                    className="text-xs text-red-500 hover:text-red-700"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
               <div className="flex items-center gap-2 mt-1">
                 {d.status === 'processing' || p ? (

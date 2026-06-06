@@ -1,9 +1,22 @@
 /**
  * 聊天状态管理：会话列表、消息列表、流式响应
+ * - 兼容 simple 模式（单轮 hybridSearch + 流式生成）
+ * - 兼容 agent 模式（function_calling + 多轮 + 跨 KB；通过 agent 事件流式 build trace）
  */
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { api, toast } from '../services/electronAPI';
-import type { Session, Message, Citation } from '../types';
+import type {
+  Session,
+  Message,
+  Citation,
+  AgentTrace,
+  ChatAgentPhaseEvent,
+} from '../types';
+
+export interface SendOptions {
+  kbIds?: string[];
+  mode?: 'simple' | 'agent';
+}
 
 export function useChat(kbId: string | null) {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -12,6 +25,10 @@ export function useChat(kbId: string | null) {
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [streamingCitations, setStreamingCitations] = useState<Citation[]>([]);
+  /** agent 模式：流式 build 的 trace（done 时清空） */
+  const [streamingTrace, setStreamingTrace] = useState<AgentTrace | null>(null);
+  /** agent 模式：当前阶段文字（用于 spinner 提示） */
+  const [streamingPhase, setStreamingPhase] = useState<string>('');
 
   // 用 ref 持有最新 activeSession，避开闭包陈旧（关键）
   const activeSessionRef = useRef<Session | null>(null);
@@ -26,6 +43,8 @@ export function useChat(kbId: string | null) {
   const offTokenRef = useRef<(() => void) | null>(null);
   const offDoneRef = useRef<(() => void) | null>(null);
   const offCitationRef = useRef<(() => void) | null>(null);
+  const offAgentStepRef = useRef<(() => void) | null>(null);
+  const offAgentPhaseRef = useRef<(() => void) | null>(null);
 
   // 加载会话列表
   const refreshSessions = useCallback(async () => {
@@ -62,6 +81,8 @@ export function useChat(kbId: string | null) {
       offTokenRef.current?.();
       offDoneRef.current?.();
       offCitationRef.current?.();
+      offAgentStepRef.current?.();
+      offAgentPhaseRef.current?.();
     };
   }, []);
 
@@ -77,7 +98,13 @@ export function useChat(kbId: string | null) {
   };
 
   const send = useCallback(
-    async (content: string, providerId: string, model: string, topK?: number) => {
+    async (
+      content: string,
+      providerId: string,
+      model: string,
+      topK?: number,
+      options: SendOptions = {},
+    ) => {
       if (!kbId || !content.trim()) return;
       // 防双发：上一次 send 还没走完就直接 return
       if (sendingRef.current) return;
@@ -85,8 +112,7 @@ export function useChat(kbId: string | null) {
 
       const currentSession = activeSessionRef.current;
 
-      // 1) 关键修复：用户消息【立刻】塞进 messages（用临时 id，
-      //    等 chat:done 时用 DB 真实数据回填覆盖）
+      // 1) 关键修复：用户消息【立刻】塞进 messages
       const tempUserId =
         'temp_user_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
       const tempUserMsg: Message = {
@@ -102,16 +128,22 @@ export function useChat(kbId: string | null) {
       setStreaming(true);
       setStreamingText('');
       setStreamingCitations([]);
+      setStreamingTrace(null);
+      setStreamingPhase('');
 
-      // 3) 先清理上次遗留订阅，避免「老 listener + 新 listener 同时 append」造成重复
+      // 3) 先清理上次遗留订阅
       offTokenRef.current?.();
       offDoneRef.current?.();
       offCitationRef.current?.();
+      offAgentStepRef.current?.();
+      offAgentPhaseRef.current?.();
       offTokenRef.current = null;
       offDoneRef.current = null;
       offCitationRef.current = null;
+      offAgentStepRef.current = null;
+      offAgentPhaseRef.current = null;
 
-      // 4) 订阅 — 用 ref 读 activeSession，闭包永远是最新的
+      // 4) 订阅
       offCitationRef.current = api.on(
         'chat:citation',
         (e: { sessionId: string; citations: Citation[] }) => {
@@ -126,9 +158,38 @@ export function useChat(kbId: string | null) {
           const sess = activeSessionRef.current;
           if (sess && e.sessionId !== sess.id) return;
           if (e.delta) {
-            // 关键：函数式 setState 追加，绝对不要 setStreamingText(e.delta) 替换
             setStreamingText((t) => t + e.delta);
           }
+        },
+      );
+      offAgentPhaseRef.current = api.on(
+        'chat:agent-phase',
+        (e: ChatAgentPhaseEvent) => {
+          const sess = activeSessionRef.current;
+          if (sess && e.sessionId !== sess.id) return;
+          const phaseLabel: Record<string, string> = {
+            'kb-select': '正在选择知识库...',
+            'kb-select-done': '',
+            planning: '正在规划检索...',
+            searching: '正在检索...',
+            critiquing: '正在评估结果...',
+            finalizing: '正在生成回答...',
+          };
+          setStreamingPhase(phaseLabel[e.phase] ?? e.phase);
+        },
+      );
+      offAgentStepRef.current = api.on(
+        'chat:agent-step',
+        (e: { sessionId: string; step: any; iteration: number }) => {
+          const sess = activeSessionRef.current;
+          if (sess && e.sessionId !== sess.id) return;
+          setStreamingTrace((t) => ({
+            steps: [...(t?.steps ?? []), e.step],
+            totalLatencyMs: t?.totalLatencyMs ?? 0,
+            kbIds: t?.kbIds ?? [],
+            iterations: e.iteration,
+            didKBSelection: t?.didKBSelection ?? false,
+          }));
         },
       );
       offDoneRef.current = api.on(
@@ -139,8 +200,9 @@ export function useChat(kbId: string | null) {
           setStreaming(false);
           setStreamingText('');
           setStreamingCitations([]);
+          setStreamingTrace(null);
+          setStreamingPhase('');
           sendingRef.current = false;
-          // 用 DB 真实消息替换本地列表（含真正入库的 user 消息和 assistant 消息）
           if (e.sessionId) {
             const list = await api.listMessages(e.sessionId);
             setMessages(list);
@@ -153,6 +215,8 @@ export function useChat(kbId: string | null) {
       try {
         const session = await api.sendChat({
           kbId,
+          kbIds: options.kbIds,
+          mode: options.mode,
           sessionId: currentSession?.id,
           content,
           providerId,
@@ -168,7 +232,8 @@ export function useChat(kbId: string | null) {
         setStreaming(false);
         setStreamingText('');
         setStreamingCitations([]);
-        // 失败：把刚塞进 messages 的临时用户消息回滚掉
+        setStreamingTrace(null);
+        setStreamingPhase('');
         setMessages((m) => m.filter((x) => x.id !== tempUserId));
         toast('error', '发送失败：' + (e?.message ?? ''));
       }
@@ -184,6 +249,8 @@ export function useChat(kbId: string | null) {
     streaming,
     streamingText,
     streamingCitations,
+    streamingTrace,
+    streamingPhase,
     send,
     newSession,
     removeSession,

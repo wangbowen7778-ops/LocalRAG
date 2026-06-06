@@ -361,6 +361,46 @@ function splitChunks(text: string, size: number, overlap: number): string[] {
 }
 
 /**
+ * 构造文档级上下文前缀（Contextual Retrieval, Anthropic 2024）
+ *
+ * 目的：解决"相关 chunk 被切散后 LLM 失去上下文"问题——
+ * 给每个 chunk 注入文档标题 + 摘要前缀，使所有 chunk 共享同一锚点，
+ * 检索时 LLM 看到的是「带上下文的片段」而非孤立文本。
+ *
+ * 不调 LLM 生成摘要（成本/延迟/隐私），cheap 方案：
+ * - title = filename
+ * - summary = 文档第一段非空内容前 200 字符
+ *
+ * 同样的带前缀 text 会同时写入 vectra 和 BM25——BM25 会把 filename 和摘要词
+ * 一起索引，用户问"X 的文档在哪"时也能命中。
+ */
+function buildContextPrefix(filename: string, fullText: string): string {
+  // 第一个非空段落
+  const firstPara =
+    fullText
+      .replace(/\r\n/g, '\n')
+      .split(/\n{2,}/)
+      .map((s) => s.trim())
+      .find((s) => s.length > 0) ?? '';
+  // 截断到 200 字符；保留句子边界
+  let summary = firstPara;
+  if (summary.length > 200) {
+    summary = summary.slice(0, 200);
+    const lastPunc = Math.max(
+      summary.lastIndexOf('。'),
+      summary.lastIndexOf('.'),
+      summary.lastIndexOf('！'),
+      summary.lastIndexOf('!'),
+      summary.lastIndexOf('；'),
+      summary.lastIndexOf(';'),
+    );
+    if (lastPunc > 80) summary = summary.slice(0, lastPunc + 1);
+  }
+  if (!summary) summary = '（无摘要）';
+  return `【文档：${filename}】\n【摘要：${summary}】\n\n`;
+}
+
+/**
  * 处理并入库
  * @returns 实际写入的块数
  */
@@ -375,8 +415,13 @@ export async function processAndIndexDoc(params: ProcessParams): Promise<number>
   }
 
   const settings = getSettings();
-  const chunks = splitChunks(text, settings.chunkSize, settings.chunkOverlap);
-  if (chunks.length === 0) throw new Error('分块后无内容');
+  const rawChunks = splitChunks(text, settings.chunkSize, settings.chunkOverlap);
+  if (rawChunks.length === 0) throw new Error('分块后无内容');
+
+  // Contextual chunking：给每个 chunk 加文档级上下文前缀
+  // 同样的带前缀 text 写入 vectra 与 BM25——LLM 检索时直接看到上下文，BM25 也吃 filename
+  const prefix = buildContextPrefix(path.basename(filePath), text);
+  const chunks = rawChunks.map((c) => prefix + c);
 
   onProgress('parsing', 25, `共 ${chunks.length} 个文本块`);
 

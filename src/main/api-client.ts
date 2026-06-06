@@ -1,14 +1,37 @@
 /**
  * 多提供商 AI 客户端
- * 统一抽象：chatStream / embedText
+ * 统一抽象：chatStream / chatCompletion / embedText
  * 兼容 OpenAI Chat Completions 协议（OpenAI / DeepSeek / DashScope 兼容模式）
  */
 import axios, { AxiosInstance } from 'axios';
-import type { ProviderConfig } from '../shared/types';
+import type { ProviderConfig, ChatMessage, ToolDef, ToolCall } from '../shared/types';
 
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+export type { ChatMessage, ToolDef, ToolCall };
+
+export interface ChatDelta {
+  /** 文本片段 */
+  content?: string;
+  /** 工具调用片段（按 index 累积） */
+  toolCallFragments?: Array<{
+    index: number;
+    id?: string;
+    type?: 'function';
+    function?: { name?: string; arguments?: string };
+  }>;
+}
+
+export interface ChatStreamOptions {
+  tools?: ToolDef[];
+  toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+}
+
+export interface ChatResponse {
+  /** 完整文本（content 字段拼接） */
   content: string;
+  /** 累积后的 tool_calls（按 index 排序） */
+  toolCalls: ToolCall[];
+  /** 最后一帧的 finish_reason：'stop' | 'tool_calls' | 'length' | ... */
+  finishReason: string;
 }
 
 function buildClient(p: ProviderConfig, apiKey: string): AxiosInstance {
@@ -57,8 +80,52 @@ export async function embedText(
 }
 
 /**
+ * 非流式 Chat：plan / critique 等中间步骤用，省一层 SSE 解析。
+ * 支持 tools（function_calling）参数和 tool_calls 解析。
+ */
+export async function chatCompletion(
+  provider: ProviderConfig,
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  options: ChatStreamOptions = {},
+): Promise<ChatResponse> {
+  const c = buildClient(provider, apiKey);
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    temperature,
+    stream: false,
+  };
+  if (options.tools?.length) body.tools = options.tools;
+  if (options.toolChoice) body.tool_choice = options.toolChoice;
+
+  try {
+    const r = await c.post('/chat/completions', body, { timeout: 120_000 });
+    const choice = r.data?.choices?.[0];
+    if (!choice) throw new Error('LLM 返回空 choices');
+    const msg = choice.message ?? {};
+    return {
+      content: typeof msg.content === 'string' ? msg.content : '',
+      toolCalls: Array.isArray(msg.tool_calls) ? (msg.tool_calls as ToolCall[]) : [],
+      finishReason: choice.finish_reason ?? 'stop',
+    };
+  } catch (e: any) {
+    // 400/422 通常意味着 Provider 不支持 tools——让上层 catch 后降级到 simple 模式
+    if (e?.response?.status === 400 || e?.response?.status === 422) {
+      const detail = e?.response?.data?.error?.message ?? e?.message ?? '未知错误';
+      throw new Error(`LLM 不支持 function_calling（HTTP ${e.response.status}）：${detail}`);
+    }
+    throw e;
+  }
+}
+
+/**
  * 流式 Chat：逐 token 回调
  * 不同 provider 的 SSE 格式略有差异，这里做归一化
+ * 支持 tools（function_calling）：POST body 加 tools 字段，SSE 解析 delta.tool_calls
+ * 累积返回完整 content + toolCalls + finishReason
  */
 export async function chatStream(
   provider: ProviderConfig,
@@ -66,19 +133,25 @@ export async function chatStream(
   model: string,
   messages: ChatMessage[],
   temperature: number,
-  onDelta: (delta: string) => void,
-): Promise<void> {
+  onDelta: (delta: ChatDelta) => void,
+  options: ChatStreamOptions = {},
+): Promise<ChatResponse> {
   const c = buildClient(provider, apiKey);
-  const resp = await c.post(
-    '/chat/completions',
-    {
-      model,
-      messages,
-      temperature,
-      stream: true,
-    },
-    { responseType: 'stream' },
-  );
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    temperature,
+    stream: true,
+  };
+  if (options.tools?.length) body.tools = options.tools;
+  if (options.toolChoice) body.tool_choice = options.toolChoice;
+
+  const resp = await c.post('/chat/completions', body, { responseType: 'stream' });
+
+  // 累积状态
+  let fullContent = '';
+  const toolAcc = new Map<number, ToolCall>();
+  let finishReason = 'stop';
 
   await new Promise<void>((resolve, reject) => {
     const stream = resp.data;
@@ -98,11 +171,43 @@ export async function chatStream(
           if (!payload) continue;
           try {
             const json = JSON.parse(payload);
-            const delta: string =
-              json.choices?.[0]?.delta?.content ??
-              json.choices?.[0]?.message?.content ??
-              '';
-            if (delta) onDelta(delta);
+            const choice = json.choices?.[0];
+            if (!choice) continue;
+            const delta = choice.delta ?? {};
+            if (choice.finish_reason) finishReason = choice.finish_reason;
+
+            // 文本片段
+            if (delta.content) {
+              fullContent += delta.content;
+              onDelta({ content: delta.content });
+            }
+
+            // 工具调用：按 index 累积
+            if (Array.isArray(delta.tool_calls)) {
+              const fragments: ChatDelta['toolCallFragments'] = [];
+              for (const tc of delta.tool_calls) {
+                const i = tc.index ?? 0;
+                if (!toolAcc.has(i)) {
+                  toolAcc.set(i, {
+                    id: tc.id ?? '',
+                    type: 'function',
+                    function: { name: tc.function?.name ?? '', arguments: '' },
+                  });
+                }
+                const acc = toolAcc.get(i)!;
+                if (tc.id) acc.id = tc.id;
+                if (tc.type) acc.type = tc.type;
+                if (tc.function?.name) acc.function.name += tc.function.name;
+                if (tc.function?.arguments) acc.function.arguments += tc.function.arguments;
+                fragments.push({
+                  index: i,
+                  id: tc.id,
+                  type: tc.type,
+                  function: { name: tc.function?.name, arguments: tc.function?.arguments },
+                });
+              }
+              onDelta({ toolCallFragments: fragments });
+            }
           } catch {
             // 忽略无法解析的片段
           }
@@ -112,4 +217,10 @@ export async function chatStream(
     stream.on('end', () => resolve());
     stream.on('error', (err: Error) => reject(err));
   });
+
+  return {
+    content: fullContent,
+    toolCalls: Array.from(toolAcc.values()),
+    finishReason,
+  };
 }

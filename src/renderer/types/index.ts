@@ -11,7 +11,13 @@ import type {
   AppInfo,
   DocProgressEvent,
   ChatTokenEvent,
+  ChatAgentStepEvent,
+  ChatAgentPhaseEvent,
   Citation,
+  AgentTrace,
+  AgentStep,
+  ToolDef,
+  ToolCall,
 } from '../../shared/types';
 
 export type {
@@ -24,7 +30,13 @@ export type {
   AppInfo,
   DocProgressEvent,
   ChatTokenEvent,
+  ChatAgentStepEvent,
+  ChatAgentPhaseEvent,
   Citation,
+  AgentTrace,
+  AgentStep,
+  ToolDef,
+  ToolCall,
 };
 
 export interface ElectronApi {
@@ -37,7 +49,8 @@ export interface ElectronApi {
   };
   doc: {
     list(kbId: string): Promise<Document[]>;
-    pick(): Promise<string | null>;
+    chunks(kbId: string, docId: string): Promise<{ chunkIndex: number; text: string }[]>;
+    pick(): Promise<string[] | null>;
     upload(kbId: string, filePath: string): Promise<Document>;
     delete(docId: string): Promise<void>;
     reindex(docId: string): Promise<void>;
@@ -52,12 +65,14 @@ export interface ElectronApi {
   chat: {
     send(p: {
       kbId: string;
+      kbIds?: string[]; // agent 模式可多选
       sessionId?: string;
       content: string;
       providerId: string;
       model: string;
       temperature?: number;
       topK?: number;
+      mode?: 'simple' | 'agent';
     }): Promise<Session>;
     sessions(kbId?: string): Promise<Session[]>;
     messages(sessionId: string): Promise<Message[]>;

@@ -17,6 +17,7 @@ export const IPC = {
   DOC_DELETE: 'doc:delete',
   DOC_REINDEX: 'doc:reindex',
   DOC_PICK: 'doc:pick', // 打开文件选择对话框
+  DOC_CHUNKS: 'doc:chunks', // 列出某文档的所有分块（用于 UI 验证向量化结果 / 排查「截断」问题）
   DOC_OCR_TEST: 'doc:ocrTest', // 测试 OCR 管线（独立于 PDF 传不传）
 
   // 对话
@@ -45,8 +46,64 @@ export const IPC = {
   EVT_CHAT_TOKEN: 'chat:token',
   EVT_CHAT_CITATION: 'chat:citation',
   EVT_CHAT_DONE: 'chat:done',
+  /** Agent 模式：推送单个 step（流式 build trace） */
+  EVT_CHAT_AGENT_STEP: 'chat:agent-step',
+  /** Agent 模式：推送阶段切换（planning / searching / critiquing / finalizing 等） */
+  EVT_CHAT_AGENT_PHASE: 'chat:agent-phase',
   EVT_TOAST: 'toast',
 } as const;
+
+// ===== Agentic RAG：工具 schema =====
+import type { ToolDef } from './types';
+
+/**
+ * Agent 模式下注册给 LLM 的工具集。
+ * - search_kb：在指定（或全部已授权）知识库中检索与子问题相关的文档片段
+ * - skip_search：声明本问题无需检索（闲聊/常识/数学/代码等）
+ */
+export const AGENT_TOOLS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'search_kb',
+      description:
+        '在指定（或全部已授权）知识库里检索与子问题相关的文档片段。' +
+        '如果需要更精确的信息可再次调用本工具（改写 sub_query 后重搜）。' +
+        '如果根据当前上下文已能回答用户问题，不要再调用本工具。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sub_query: {
+            type: 'string',
+            description: '针对当前子问题的精确检索词（去口语化、保留专有名词、错误码、API 名）',
+          },
+          kb_ids: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '限定要检索的 KB id 列表；为空或不传则检索全部已授权 KB',
+          },
+        },
+        required: ['sub_query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skip_search',
+      description:
+        '表示本问题无需检索（闲聊/问候/常识/数学/代码等）。' +
+        '调用后直接基于通识回答。',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: '为什么不需要检索（简短）' },
+        },
+        required: ['reason'],
+      },
+    },
+  },
+];
 
 // keytar 凭据统一前缀，便于卸载时清理
 export const KEYTAR_SERVICE = 'LocalRAG';
@@ -71,7 +128,7 @@ export const DEFAULT_TOP_K = 5;
 
 // 应用名称
 export const APP_NAME = 'LocalRAG';
-export const APP_VERSION = '1.1.6';
+export const APP_VERSION = '1.2.0';
 
 // Provider 预设
 export const PROVIDER_PRESETS = {

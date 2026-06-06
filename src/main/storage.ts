@@ -27,6 +27,12 @@ const DEFAULT_SETTINGS: Settings = {
   language: 'zh-CN',
   autoLaunch: false,
   enableOcr: false,
+  enableBm25: true,
+  // Agentic RAG（v1.2.0）：默认关闭，老用户升级后行为不变
+  enableAgent: false,
+  agentMaxIterations: 4,
+  enableKBSelector: true,
+  agentTopKPerQuery: 5,
 };
 
 // ===== 基础工具 =====
@@ -60,6 +66,17 @@ function prep(sql: string) {
       const s = getDb().prepare(sql);
       try {
         s.run(params as any);
+      } finally {
+        s.free();
+      }
+      persist();
+    },
+    /** 写操作并返回 affected rows 数量（用于启动恢复等需要知道影响多少行的场景） */
+    runWithChanges: (...params: (string | number | boolean | null)[]): number => {
+      const s = getDb().prepare(sql);
+      try {
+        s.run(params as any);
+        return (s as any).getRowsModified?.() ?? 0;
       } finally {
         s.free();
       }
@@ -221,6 +238,21 @@ export async function initStorage(): Promise<void> {
         WHERE kb_id = knowledge_bases.id AND status = 'ready'
       ), 0)
   `).run();
+
+  // 迁移：v1.2.0 Agentic RAG
+  // - messages.agent_trace  JSON 序列化的 AgentTrace（assistant 消息专用）
+  // - messages.tool_call_id tool role 消息回填对应 assistant.tool_calls[].id
+  // - messages.name         tool 消息携带的工具名（search_kb / skip_search）
+  const msgCols = prep('PRAGMA table_info(messages)').all() as { name: string }[];
+  if (!msgCols.some((c) => c.name === 'agent_trace')) {
+    exec('ALTER TABLE messages ADD COLUMN agent_trace TEXT');
+  }
+  if (!msgCols.some((c) => c.name === 'tool_call_id')) {
+    exec('ALTER TABLE messages ADD COLUMN tool_call_id TEXT');
+  }
+  if (!msgCols.some((c) => c.name === 'name')) {
+    exec('ALTER TABLE messages ADD COLUMN name TEXT');
+  }
 }
 
 // ===== Settings =====
@@ -353,6 +385,16 @@ export function listDocs(kbId: string): Document[] {
   );
 }
 
+/** 找出所有「上次没跑完」的文档（pending / processing）—— 启动时把它们标 failed
+ *  因为 filePath 没落盘，无法重跑，避免列表里一堆「等待中」永远卡住 */
+export function markStuckDocsAsFailed(reason: string): number {
+  return prep(
+    `UPDATE documents
+     SET status = 'failed', error_message = ?
+     WHERE status IN ('pending', 'processing')`,
+  ).runWithChanges(reason);
+}
+
 export function createDoc(d: Omit<Document, 'chunkCount' | 'createdAt'> & { chunkCount?: number }): void {
   prep(
     `INSERT INTO documents (id, kb_id, filename, size, mime_type, status, chunk_count, error_message, created_at)
@@ -471,13 +513,18 @@ export function deleteSession(id: string): void {
 
 export function addMessage(m: Omit<Message, 'createdAt'>): void {
   prep(
-    'INSERT INTO messages (id, session_id, role, content, citations, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    `INSERT INTO messages
+       (id, session_id, role, content, citations, agent_trace, tool_call_id, name, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     m.id,
     m.sessionId,
     m.role,
     m.content,
     m.citations ? JSON.stringify(m.citations) : null,
+    m.agentTrace ? JSON.stringify(m.agentTrace) : null,
+    m.toolCallId ?? null,
+    m.name ?? null,
     Date.now(),
   );
 }
@@ -488,8 +535,11 @@ export function listMessages(sessionId: string): Message[] {
       id: r.id,
       sessionId: r.session_id,
       role: r.role,
-      content: r.content,
+      content: r.content ?? '',
       citations: r.citations ? JSON.parse(r.citations) : undefined,
+      agentTrace: r.agent_trace ? JSON.parse(r.agent_trace) : undefined,
+      toolCallId: r.tool_call_id ?? undefined,
+      name: r.name ?? undefined,
       createdAt: r.created_at,
     }),
   );

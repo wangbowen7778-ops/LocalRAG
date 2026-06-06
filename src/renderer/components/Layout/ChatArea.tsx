@@ -1,5 +1,7 @@
 /**
  * 对话区域：会话侧栏 + 消息列表 + 输入框
+ * - 顶部模式切换：简单 / Agent（默认由 settings.enableAgent 决定）
+ * - 跨 KB 模式：把 selectedIds 喂给后端
  */
 import { useState, useEffect } from 'react';
 import type { KnowledgeBase, ProviderConfig } from '../../types';
@@ -11,9 +13,21 @@ interface Props {
   activeKB: KnowledgeBase | null;
   providers: ProviderConfig[];
   onNeedProvider: () => void;
+  /** Agent 模式开关（受控） */
+  agentMode: boolean;
+  onToggleAgentMode: () => void;
+  /** 跨 KB 模式选中的 KB id 列表 */
+  kbIds: string[];
 }
 
-export function ChatArea({ activeKB, providers, onNeedProvider }: Props) {
+export function ChatArea({
+  activeKB,
+  providers,
+  onNeedProvider,
+  agentMode,
+  onToggleAgentMode,
+  kbIds,
+}: Props) {
   const chat = useChat(activeKB?.id ?? null);
   const [providerId, setProviderId] = useState<string>('');
   const [model, setModel] = useState<string>('');
@@ -50,6 +64,8 @@ export function ChatArea({ activeKB, providers, onNeedProvider }: Props) {
       </div>
     );
   }
+
+  const multiKb = kbIds.length > 1;
 
   return (
     <div className="flex-1 flex min-w-0 h-full min-h-0">
@@ -99,6 +115,27 @@ export function ChatArea({ activeKB, providers, onNeedProvider }: Props) {
             onChange={(e) => setModel(e.target.value)}
             className="px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark text-slate-700 dark:text-slate-200 flex-1 min-w-0"
           />
+          <button
+            onClick={onToggleAgentMode}
+            className={
+              'text-xs px-2 py-1 rounded border ' +
+              (agentMode
+                ? 'bg-primary-500 text-white border-primary-500'
+                : 'border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700')
+            }
+            title={
+              agentMode
+                ? 'Agent 模式：function_calling + 多轮迭代 + 跨 KB'
+                : '简单模式：单轮混合检索 + 直接生成'
+            }
+          >
+            {agentMode ? '🧠 Agent' : '⚡ 简单'}
+          </button>
+          {multiKb && (
+            <span className="text-xs px-2 py-1 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">
+              跨 {kbIds.length} KB
+            </span>
+          )}
         </div>
 
         <MessageList
@@ -106,12 +143,18 @@ export function ChatArea({ activeKB, providers, onNeedProvider }: Props) {
           streaming={chat.streaming}
           streamingText={chat.streamingText}
           streamingCitations={chat.streamingCitations}
+          streamingTrace={chat.streamingTrace}
+          streamingPhase={chat.streamingPhase}
         />
 
-        {/* 输入区：锚定页面底部（不随消息滚动） */}
         <InputBox
           disabled={chat.streaming}
-          onSend={(text) => chat.send(text, providerId, model)}
+          onSend={(text) =>
+            chat.send(text, providerId, model, undefined, {
+              mode: agentMode ? 'agent' : 'simple',
+              kbIds: multiKb ? kbIds : undefined,
+            })
+          }
         />
       </div>
     </div>

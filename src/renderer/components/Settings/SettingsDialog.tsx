@@ -267,6 +267,92 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 首次使用需联网下载中文 + 英文语言模型（~23MB），之后离线可用，识别 1-3 秒/页。
                 关闭则保持纯文本提取，不下载模型、不占内存。
               </div>
+              <Row label="混合检索 (BM25)">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableBm25 !== false}
+                    onChange={(e) => setGeneral((g) => ({ ...g, enableBm25: e.target.checked }))}
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    向量 + BM25 双路融合（推荐）
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                向量检索擅长语义相似（"忘记密码" ≈ "如何重置密码"），但对<strong>精确术语、错误码、API 名</strong>易失真。
+                BM25 是经典词频检索，弥补上述短板，两路结果用 RRF 融合。
+                关闭后仅用向量检索。v1.1.6 之前的老文档会在下次启动时自动回填 BM25 索引。
+              </div>
+
+              <Row label="Agent 模式 (v1.2.0)">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableAgent ?? false}
+                    onChange={(e) => setGeneral((g) => ({ ...g, enableAgent: e.target.checked }))}
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    启用 Agentic RAG（function_calling + 多轮迭代 + 跨 KB）
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                关闭时与旧版行为一致（单轮混合检索 + 直接生成）。开启后 LLM 可以自主决定：
+                是否检索、用什么子问题检索、检索几次、信息够不够。
+                需要 Provider 支持 <strong>function_calling</strong>（OpenAI / DeepSeek / 通义千问 / 硅基流动 均支持）。
+                Agent 模式首问会比简单模式慢 2-5 秒，可在 ChatArea 顶部临时切换。
+              </div>
+              <Row label="最大迭代次数">
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={general.agentMaxIterations ?? 4}
+                  onChange={(e) =>
+                    setGeneral((g) => ({ ...g, agentMaxIterations: +e.target.value }))
+                  }
+                  className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                />
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                LLM 最多循环几次「检索 → 评估」。超过自动进入"基于已收集资料直接回答"模式，
+                不会死循环。建议 3-5。值越大越可能用更多 token，越小越快。
+              </div>
+              <Row label="LLM 自选 KB">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableKBSelector !== false}
+                    onChange={(e) =>
+                      setGeneral((g) => ({ ...g, enableKBSelector: e.target.checked }))
+                    }
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    把 KB 描述喂给 LLM 让它自己挑
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                启用后，多 KB 场景下第一轮会先问一次 LLM"哪些 KB 可能相关"，只检索选中的。
+                关闭则检索全部已选 KB。给 KB 加<strong>准确的 description</strong>（在左侧新建时填写）效果更佳。
+              </div>
+              <Row label="单次检索 Top-K">
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={general.agentTopKPerQuery ?? 5}
+                  onChange={(e) =>
+                    setGeneral((g) => ({ ...g, agentTopKPerQuery: +e.target.value }))
+                  }
+                  className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                />
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                每次子问题检索召回的片段数（多 KB 融合后取 topK）。
+                值越大 LLM 看到越多上下文（也越费 token），越小越精炼。
+              </div>
               <div className="flex items-center gap-2 pl-1">
                 <button
                   onClick={async () => {
@@ -342,9 +428,11 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 </div>
               </Row>
               <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
-                余弦相似度阈值。检索结果中分数低于此值的片段不会喂给 LLM、也不会展示为引用。
-                设为 0 关闭过滤；OpenAI / 多数 embedding 模型，相关片段通常 0.5+。
-                多个相似文档都引用了？把阈值拉高到 0.5-0.6 一般就能解决。
+                相似度阈值。检索结果中分数低于此值的片段不会喂给 LLM、也不会展示为引用。
+                设为 0 关闭过滤。
+                <strong>纯向量</strong>：cosine similarity，OpenAI / 多数模型相关片段通常 0.5+，可以拉到 0.5-0.6 解决"多个相似文档都引用了"的问题。
+                <strong>混合检索</strong>：score 已归一化到 [0,1]（1.0 = 两路都最强，0.5 = 单路最强），
+                0.4 ≈ "至少一路进 top 1-2"；想更严格调到 0.5，想更宽松调到 0.2。
               </div>
               <Row label="Temperature">
                 <input

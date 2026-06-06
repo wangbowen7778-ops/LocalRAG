@@ -1,18 +1,34 @@
 /**
  * 单条消息气泡
+ * - agent 模式：在内容上方渲染 AgentTraceView（折叠）
+ * - 引用来源：内容下方
  */
 import { marked } from 'marked';
-import type { Message, Citation } from '../../types';
+import type { Message, Citation, AgentTrace } from '../../types';
+import { AgentTraceView } from './AgentTraceView';
 
 interface Props {
   role: Message['role'];
   content: string;
   citations?: Citation[];
+  agentTrace?: AgentTrace;
+  /** 流式态：传入当前阶段 + 部分 trace（实时 build） */
+  streamingAgentTrace?: AgentTrace;
+  streamingAgentPhase?: string;
 }
 
-export function MessageBubble({ role, content, citations }: Props) {
+export function MessageBubble({
+  role,
+  content,
+  citations,
+  agentTrace,
+  streamingAgentTrace,
+  streamingAgentPhase,
+}: Props) {
   const isUser = role === 'user';
-  const html = marked.parse(content, { async: false }) as string;
+  const trace = agentTrace ?? streamingAgentTrace;
+  const isPending = !!streamingAgentTrace && !agentTrace;
+  const html = content ? (marked.parse(content, { async: false }) as string) : '';
 
   return (
     <div className={'flex ' + (isUser ? 'justify-end' : 'justify-start')}>
@@ -24,11 +40,19 @@ export function MessageBubble({ role, content, citations }: Props) {
             : 'bg-white dark:bg-surface-dark-2 border border-slate-200 dark:border-slate-700')
         }
       >
-        <div
-          className="markdown-body"
-          // 简单实现：生产环境应配合 DOMPurify
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {/* agent 模式：trace 折叠放在内容上方 */}
+        {trace && !isUser && (
+          <AgentTraceView trace={trace} pending={isPending} activePhase={streamingAgentPhase} />
+        )}
+
+        {content ? (
+          <div
+            className="markdown-body"
+            // 简单实现：生产环境应配合 DOMPurify
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        ) : isPending ? null : null}
+
         {citations && citations.length > 0 && !isUser && (
           <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-600 text-xs">
             <div className="font-semibold text-slate-500 mb-1">引用来源</div>

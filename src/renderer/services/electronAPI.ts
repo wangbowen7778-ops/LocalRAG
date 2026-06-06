@@ -23,11 +23,7 @@ export const api = {
 
   // Doc
   listDocs: (kbId: string) => window.api.doc.list(kbId),
-  pickAndUpload: async (kbId: string): Promise<Document | null> => {
-    const fp = await window.api.doc.pick();
-    if (!fp) return null;
-    return window.api.doc.upload(kbId, fp);
-  },
+  getDocChunks: (kbId: string, docId: string) => window.api.doc.chunks(kbId, docId),
   uploadDoc: (kbId: string, filePath: string) => window.api.doc.upload(kbId, filePath),
   deleteDoc: (id: string) => window.api.doc.delete(id),
   ocrTest: () => window.api.doc.ocrTest(),
