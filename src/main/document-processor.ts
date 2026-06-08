@@ -7,6 +7,11 @@
  *   - PdfjsTextExtractor    纯文本 PDF（默认，零成本）
  *   - TesseractOcrExtractor 扫描件 / 图片型 PDF（用户在设置中开启 OCR 后自动 fallback）
  * 将来加云 OCR / RapidOCR，只需新增一个 TextExtractor 实现并在 selectExtractors() 注册。
+ *
+ * 切分策略：按文件类型分发到 src/main/chunkers/ 下的不同实现：
+ *   - 文本层 PDF → pdfItemsToText（按 y/x 排版 + 跳页眉页脚）→ recursive（A+C）
+ *   - OCR 后 PDF / DOCX / TXT → recursive（A+C）
+ *   - Markdown → markdown 结构感知（B+A+C）
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,7 +28,8 @@ import { SecureStore } from './secure-store';
 import { embedText } from './api-client';
 import { addChunks, deleteChunksByDoc } from './vector-store';
 import { getSettings, getUserDataDir } from './storage';
-import type { DocProgressEvent } from '../shared/types';
+import { chunkDocument, pdfItemsToText, type ChunkInput, type PdfTextItem } from './chunkers';
+import type { DocProgressEvent, ProviderConfig } from '../shared/types';
 
 interface ProcessParams {
   docId: string;
@@ -233,6 +239,64 @@ const TesseractOcrExtractor: TextExtractor = {
   },
 };
 
+/**
+ * 从 PDF 抽取带坐标的 text items（供版面感知切分用）
+ *
+ * 与 PdfjsTextExtractor.extract 的区别：本函数不拼接文本，而是把每条 text item
+ * 携 (x, y, page) 一起返回——下游 pdfItemsToText 按阅读序重排 + 跳页眉页脚。
+ *
+ * @returns items + pageHeight；items 数组可能为空（扫描件），调用方按需 fallback OCR
+ */
+async function extractPdfTextItems(
+  buf: Buffer,
+  onProgress?: ProgressFn,
+): Promise<{ items: PdfTextItem[]; pageHeight: number }> {
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buf),
+    cMapUrl: pdfjsAssetDir('cmaps'),
+    cMapPacked: true,
+    standardFontDataUrl: pdfjsAssetDir('standard_fonts'),
+    verbosity: 0,
+    canvasFactory: new NapiCanvasFactory(),
+  });
+  let doc;
+  try {
+    doc = await loadingTask.promise;
+  } catch (e) {
+    throw new Error(`PDF 结构无法解析（${(e as Error).message}）。` +
+      `若为密码保护文件，目前不支持；如文件可正常打开，请用「打印 → 另存为 PDF」重新导出一次。`);
+  }
+  const items: PdfTextItem[] = [];
+  let pageHeight = 0;
+  try {
+    const num = doc.numPages;
+    for (let i = 1; i <= num; i++) {
+      onProgress?.('parsing', 5 + (i / num) * 20, `解析 PDF 文字层 ${i}/${num}`);
+      const page = await doc.getPage(i);
+      const viewport = page.getViewport({ scale: 1 });
+      pageHeight = Math.max(pageHeight, viewport.height);
+      const content = await page.getTextContent();
+      for (const raw of content.items as Array<{
+        str: string;
+        transform: number[];
+        hasEOL?: boolean;
+      }>) {
+        if (!raw.str) continue;
+        items.push({
+          str: raw.str,
+          x: raw.transform[4] ?? 0,
+          y: raw.transform[5] ?? 0,
+          hasEOL: !!raw.hasEOL,
+          page: i - 1,
+        });
+      }
+    }
+  } finally {
+    await doc.destroy();
+  }
+  return { items, pageHeight };
+}
+
 /** 按顺序选择要尝试的提取器（PDF 走 pdfjs → tesseract fallback） */
 function selectExtractors(ext: string, mimeType: string, settings: ReturnType<typeof getSettings>): TextExtractor[] {
   if (ext === '.pdf' || mimeType === 'application/pdf') {
@@ -319,48 +383,6 @@ async function extractText(
 }
 
 /**
- * 滑动窗口分块
- * - 优先按段落（\n\n）切分
- * - 单段过长时按句号切
- * - 最后按 chunkSize 强制切片，保留 overlap
- */
-function splitChunks(text: string, size: number, overlap: number): string[] {
-  const cleaned = text.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').trim();
-  if (!cleaned) return [];
-
-  const paragraphs = cleaned.split(/\n{2,}/);
-  const chunks: string[] = [];
-  let buf = '';
-
-  const flush = () => {
-    if (buf.trim()) chunks.push(buf.trim());
-    buf = '';
-  };
-
-  for (const p of paragraphs) {
-    if (p.length > size) {
-      // 大段单独切
-      flush();
-      for (let i = 0; i < p.length; i += size - overlap) {
-        const piece = p.slice(i, i + size);
-        if (piece.trim()) chunks.push(piece.trim());
-      }
-      continue;
-    }
-    if ((buf + '\n\n' + p).length > size) {
-      flush();
-      // 保留 overlap
-      const tail = chunks[chunks.length - 1]?.slice(-overlap) ?? '';
-      buf = (tail ? tail + '\n' : '') + p;
-    } else {
-      buf = buf ? buf + '\n\n' + p : p;
-    }
-  }
-  flush();
-  return chunks;
-}
-
-/**
  * 构造文档级上下文前缀（Contextual Retrieval, Anthropic 2024）
  *
  * 目的：解决"相关 chunk 被切散后 LLM 失去上下文"问题——
@@ -406,21 +428,55 @@ function buildContextPrefix(filename: string, fullText: string): string {
  */
 export async function processAndIndexDoc(params: ProcessParams): Promise<number> {
   const { docId, kbId, filePath, onProgress } = params;
-  onProgress('parsing', 5, '解析文档');
+  const ext = path.extname(filePath).toLowerCase();
+  const buf = fs.readFileSync(filePath);
 
-  const text = await extractText(filePath, params.mimeType, onProgress);
-  if (!text || text.length < 10) {
-    // 理论上 extractText 内部已 throw；这里是兜底
-    throw new Error(`解析后文本仅 ${text?.length ?? 0} 字符。可能是文件内容实际为空。`);
+  // 1) 提取 → ChunkInput（按文件类型走不同路径）
+  let input: ChunkInput;
+  if (ext === '.pdf' || params.mimeType === 'application/pdf') {
+    onProgress('parsing', 5, '解析 PDF 文字层');
+    try {
+      const { items, pageHeight } = await extractPdfTextItems(buf, onProgress);
+      const text = pdfItemsToText({ items, pageHeight });
+      if (!text || text.length < 10) {
+        throw new Error('PDF 文字层内容过短');
+      }
+      input = { type: 'plain', text };
+    } catch (e) {
+      const settings = getSettings();
+      if (!settings.enableOcr) {
+        throw new Error(`PDF 文字层解析失败（${(e as Error).message}），且未开启 OCR。` +
+          `请在「设置 → 常规」开启「对扫描件 PDF 启用 OCR」后重试。`);
+      }
+      onProgress('ocr', 5, 'PDF 文字层为空，启动 OCR');
+      const ocrText = await TesseractOcrExtractor.extract(buf, { onProgress, filePath });
+      input = { type: 'plain', text: ocrText };
+    }
+  } else if (ext === '.md' || params.mimeType === 'text/markdown') {
+    // Markdown 走结构感知切分，保留标题/代码块/表格层级
+    onProgress('parsing', 10, '读取 Markdown');
+    input = { type: 'markdown', text: buf.toString('utf-8') };
+  } else {
+    // DOCX / TXT：走原有抽取器（Mammoth / iconv）
+    onProgress('parsing', 5, '解析文档');
+    input = { type: 'plain', text: await extractText(filePath, params.mimeType, onProgress) };
   }
 
+  if (!input.text || input.text.length < 10) {
+    throw new Error(`解析后文本仅 ${input.text?.length ?? 0} 字符。可能是文件内容实际为空。`);
+  }
+
+  // 2) 切分（按 input.type 自动挑 chunker；chunkSize/chunkOverlap 单位是 token）
   const settings = getSettings();
-  const rawChunks = splitChunks(text, settings.chunkSize, settings.chunkOverlap);
+  const rawChunks = chunkDocument(input, {
+    chunkSize: settings.chunkSize,
+    chunkOverlap: settings.chunkOverlap,
+  });
   if (rawChunks.length === 0) throw new Error('分块后无内容');
 
-  // Contextual chunking：给每个 chunk 加文档级上下文前缀
+  // 3) Contextual chunking：给每个 chunk 加文档级上下文前缀
   // 同样的带前缀 text 写入 vectra 与 BM25——LLM 检索时直接看到上下文，BM25 也吃 filename
-  const prefix = buildContextPrefix(path.basename(filePath), text);
+  const prefix = buildContextPrefix(path.basename(filePath), input.text);
   const chunks = rawChunks.map((c) => prefix + c);
 
   onProgress('parsing', 25, `共 ${chunks.length} 个文本块`);
@@ -521,6 +577,24 @@ export async function resolveEmbeddingProvider() {
   if (!provider) provider = providers[0];
   if (!provider) throw new Error('尚未配置任何 AI Provider');
   return provider;
+}
+
+/**
+ * 根据设置选取可用于"查询改写"的 Provider + 模型（v1.2.2）。
+ * - 优先用 rewriterProviderId；为空则回退到 defaultProviderId / 第一个
+ * - 模型：rewriterModel 非空则用之；否则用该 Provider 的 chatModel
+ * - 改写本质是一次非流式 chatCompletion，Provider 必须支持 chat 接口
+ */
+export function resolveRewriterProvider(
+  settings: ReturnType<typeof getSettings>,
+): { provider: ProviderConfig; model: string } {
+  const providers = listProviders();
+  let provider = providers.find((p) => p.id === settings.rewriterProviderId);
+  if (!provider) provider = providers.find((p) => p.id === settings.defaultProviderId);
+  if (!provider) provider = providers[0];
+  if (!provider) throw new Error('尚未配置任何 AI Provider');
+  const model = (settings.rewriterModel ?? '').trim() || provider.chatModel;
+  return { provider, model };
 }
 
 /** 删除某文档的所有向量 */

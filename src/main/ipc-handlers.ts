@@ -33,14 +33,18 @@ import {
   deleteSession,
   getSession,
   getUserDataDir,
+  addSessionSummary,
+  getLatestSessionSummary,
+  searchSessionSummaries,
 } from './storage';
 import { SecureStore } from './secure-store';
 import { deleteDocChunks, resolveEmbeddingProvider, runOcrSelfTest } from './document-processor';
 import { hybridSearch, deleteCollection, listChunksByDoc, bm25RebuildFromVectra } from './vector-store';
 import { UploadQueue } from './upload-queue';
-import { chatStream, embedText } from './api-client';
+import { chatStream, embedText, rewriteQuery, summarizeConversation } from './api-client';
 import { runAgent, selectKBs } from './agent';
 import type { ProviderConfig, ChatTokenEvent, Citation } from '../shared/types';
+import { resolveRewriterProvider } from './document-processor';
 
 type WindowGetter = () => BrowserWindow | null;
 
@@ -59,6 +63,132 @@ function safeHandle<T>(channel: string, fn: (...args: any[]) => Promise<T>) {
 function emit<T>(getWin: WindowGetter, channel: string, data: T) {
   const w = getWin();
   if (w && !w.isDestroyed()) w.webContents.send(channel, data);
+}
+
+/**
+ * v1.2.2 查询改写：把"哪一章？" / "它" / "刚才那个"补成自包含 query。
+ * 返回改写后的 query；改写关闭 / 失败时返回原 userContent。
+ * 用 sessionId 缓存：同一 session 同一 (lastUserKey, currentQuery) 不重写。
+ */
+async function applyQueryRewrite(
+  sessionId: string,
+  userMsgId: string,
+  chatApiKey: string,
+  settings: ReturnType<typeof getSettings>,
+  userContent: string,
+): Promise<string> {
+  if (settings.enableQueryRewrite === false) return userContent;
+  try {
+    const { provider: rwProvider, model: rwModel } = resolveRewriterProvider(settings);
+    // 用户指定了独立 rewriterProviderId 才取独立 key；否则复用 chat provider 的 key
+    const rwKey = settings.rewriterProviderId
+      ? (await SecureStore.getApiKey(rwProvider.id)) ?? chatApiKey
+      : chatApiKey;
+    if (!rwKey) {
+      console.warn('[chat] [rewrite] 改写 Provider 缺少 API Key，回退原 query');
+      return userContent;
+    }
+    const historyMessages = listMessages(sessionId);
+    const rewritten = await rewriteQuery(
+      rwProvider,
+      rwKey,
+      rwModel,
+      historyMessages,
+      userMsgId,
+      userContent,
+      sessionId,
+    );
+    if (rewritten !== userContent) {
+      console.log(`[chat] [rewrite] "${userContent}" → "${rewritten}"`);
+    }
+    return rewritten;
+  } catch (e) {
+    console.warn('[chat] [rewrite] 改写失败，用原 query:', (e as Error).message);
+    return userContent;
+  }
+}
+
+/**
+ * v1.2.3 周期摘要：自上次摘要以来新增的 user turn ≥ summaryTriggerTurns → 触发。
+ * fire-and-forget，不阻塞 chat 主流程；失败仅 console.warn。
+ */
+async function maybeSummarizeSession(
+  sessionId: string,
+  currentUserMsgId: string,
+  chatApiKey: string,
+  settings: ReturnType<typeof getSettings>,
+): Promise<void> {
+  const triggerTurns = settings.summaryTriggerTurns ?? 20;
+  if (triggerTurns <= 0) return; // 0 = 关闭
+
+  // 1. 找上次摘要的 endMsgId（可能为空 = 第一次）
+  const lastSummary = getLatestSessionSummary(sessionId);
+  const allMessages = listMessages(sessionId);
+  if (allMessages.length === 0) return;
+
+  // 2. 找"自上次摘要结束到当前 user msg"的新增 user 消息
+  const startIdx = lastSummary
+    ? allMessages.findIndex((m) => m.id === lastSummary.endMsgId) + 1
+    : 0;
+  const endIdx = allMessages.findIndex((m) => m.id === currentUserMsgId);
+  if (endIdx < 0) return;
+
+  const newMessages = allMessages.slice(startIdx, endIdx); // 不含当前 user msg
+  const newUserTurns = newMessages.filter((m) => m.role === 'user').length;
+  if (newUserTurns < triggerTurns) return;
+
+  // 3. 准备待摘要内容：把每条 msg 压成 "role: content" 单行（去换行）
+  //    控制总量：最多 40 条 / 8000 字（防 LLM context 爆）
+  const compact = newMessages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-40)
+    .map((m) => {
+      const c = (m.content ?? '').replace(/\s+/g, ' ').trim();
+      return `${m.role === 'user' ? '用户' : '助手'}：${c.length > 600 ? c.slice(0, 600) + '…' : c}`;
+    });
+  const compactStr = compact.join('\n');
+  if (compactStr.length > 8000) {
+    console.warn(`[chat] [summary] 待摘要内容 ${compactStr.length} 字超 8000，截断`);
+  }
+
+  // 4. 调 LLM 生成摘要
+  const { provider: rwProvider, model: rwModel } = resolveRewriterProvider(settings);
+  const rwKey = settings.rewriterProviderId
+    ? (await SecureStore.getApiKey(rwProvider.id)) ?? chatApiKey
+    : chatApiKey;
+  if (!rwKey) return;
+
+  const result = await summarizeConversation(
+    rwProvider,
+    rwKey,
+    rwModel,
+    compact.map((s) => ({
+      role: s.startsWith('用户：') ? ('user' as const) : ('assistant' as const),
+      content: s.replace(/^(用户|助手)：/, ''),
+    })),
+  );
+  if (!result || !result.summary) {
+    console.warn('[chat] [summary] 摘要生成失败，跳过');
+    return;
+  }
+
+  // 5. 写入 session_summaries
+  const newMessagesForRange = newMessages.filter(
+    (m) => m.role === 'user' || m.role === 'assistant',
+  );
+  if (newMessagesForRange.length === 0) return;
+  addSessionSummary({
+    id: 'sum_' + Date.now().toString(36),
+    sessionId,
+    startMsgId: newMessagesForRange[0].id,
+    endMsgId: newMessagesForRange[newMessagesForRange.length - 1].id,
+    summary: result.summary,
+    keyTopics: result.keyTopics,
+    keyEntities: result.keyEntities,
+  });
+  console.log(
+    `[chat] [summary] session=${sessionId} 摘要已生成：${newUserTurns} turns, ${result.summary.length} 字`,
+  );
 }
 
 /**
@@ -86,12 +216,21 @@ async function runSimpleChat(
   let citations: Citation[] = [];
   let contextText = '';
 
+  // v1.2.2 查询改写：把"哪一章？" / "它" / "刚才那个"补成自包含 query
+  const effectiveQuery = await applyQueryRewrite(
+    sessionId,
+    _userMsgId,
+    apiKey,
+    settings,
+    payload.content,
+  );
+
   try {
     const embedProvider = await resolveEmbeddingProvider();
     const embedKey = await SecureStore.getApiKey(embedProvider.id);
     if (!embedKey) throw new Error('embedding Provider 缺少 API Key');
-    const qvec = await embedText(embedProvider, embedKey, payload.content);
-    const rawHits = await hybridSearch(kbId, payload.content, qvec, topK, { enableBm25 });
+    const qvec = await embedText(embedProvider, embedKey, effectiveQuery);
+    const rawHits = await hybridSearch(kbId, effectiveQuery, qvec, topK, { enableBm25 });
     const chunks = scoreThreshold > 0 ? rawHits.filter((c) => c.score >= scoreThreshold) : rawHits;
     citations = chunks.map((c) => ({
       docId: c.docId,
@@ -107,10 +246,30 @@ async function runSimpleChat(
     console.warn('检索失败，继续无上下文回答', e);
   }
 
+  // v1.2.3 历史对话摘要召回：跨 session 用 SQL LIKE 搜摘要表，按 query 关键词命中 top 2
+  //   用户问"我们之前聊过 X 吗" / "上次讨论的 Y 是什么"时自动注入到 LLM 上下文
+  const pastSummaries = searchSessionSummaries(payload.content, 2);
+  const summaryBlock =
+    pastSummaries.length > 0
+      ? '【历史对话摘要】\n' +
+        pastSummaries
+          .map(
+            (s, i) =>
+              `[#H${i + 1} ${new Date(s.createdAt).toLocaleString('zh-CN')}] ${s.summary}` +
+              (s.keyEntities.length > 0
+                ? `\n  涉及实体：${s.keyEntities.map((e) => `${e.type}=${e.value}`).join('、')}`
+                : ''),
+          )
+          .join('\n\n')
+      : '';
+
   emit(getMainWindow, IPC.EVT_CHAT_CITATION, { sessionId, citations });
 
-  const sysPrompt = `你是一个严谨的本地知识库助手。优先基于【参考资料】回答；如果资料不足，请明确说明并基于通识回答。回答末尾用 Markdown 列表形式列出引用的编号。`;
-  const userPrompt = `【参考资料】\n${contextText}\n\n【用户问题】\n${payload.content}`;
+  const sysPrompt = `你是一个严谨的本地知识库助手。优先基于【参考资料】回答；如果资料不足，请明确说明并基于通识回答。
+【历史对话摘要】包含同一知识库下其它会话中聊过的相关话题，可以引用（例如"我们之前讨论过..."），但不是当前文档知识的一部分。回答末尾用 Markdown 列表形式列出引用的编号。`;
+  const userPrompt =
+    (summaryBlock ? summaryBlock + '\n\n' : '') +
+    `【参考资料】\n${contextText}\n\n【用户问题】\n${payload.content}`;
   const messages = [
     { role: 'system' as const, content: sysPrompt },
     ...listMessages(sessionId)
@@ -335,6 +494,10 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
       const settings = getSettings();
       const mode = payload.mode ?? (settings.enableAgent ? 'agent' : 'simple');
 
+      // 3.5) v1.2.3 后台触发周期摘要：fire-and-forget，不阻塞主流程
+      //      失败 console.warn 后跳过；下次 user 消息再试
+      void maybeSummarizeSession(session.id, userMsgId, apiKey, settings);
+
       // 4. 解析候选 KB 列表（白名单校验）
       const allKBs = listKBs();
       const candidateKbIds = (payload.kbIds && payload.kbIds.length > 0 ? payload.kbIds : [payload.kbId])
@@ -344,6 +507,18 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
       }
 
       // 5. agent 模式下多 KB 时走 LLM 自选
+      // v1.2.2：与 runSimpleChat 一致，agent 路径的 userContent 也走查询改写
+      //   （用 applyQueryRewrite 同一份 helper，sessionId 缓存会让 simple/agent 不会重复调 LLM）
+      let effectiveUserContent = payload.content;
+      if (mode === 'agent') {
+        effectiveUserContent = await applyQueryRewrite(
+          session.id,
+          userMsgId,
+          apiKey,
+          settings,
+          payload.content,
+        );
+      }
       let didKBSelection = false;
       let activeKbIds = candidateKbIds;
       if (mode === 'agent' && settings.enableKBSelector !== false && candidateKbIds.length > 1) {
@@ -352,7 +527,7 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
           phase: 'kb-select',
         });
         activeKbIds = await selectKBs(
-          payload.content,
+          effectiveUserContent,
           allKBs,
           candidateKbIds,
           provider,
@@ -376,6 +551,7 @@ export function registerIpcHandlers(getMainWindow: WindowGetter) {
               sessionId: session.id,
               userMsgId,
               userContent: payload.content,
+              effectiveUserContent,
               kbIds: activeKbIds,
               provider,
               apiKey,

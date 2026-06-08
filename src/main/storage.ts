@@ -11,7 +11,7 @@ import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
-import type { Settings, KnowledgeBase, Document, Session, Message, ProviderConfig } from '../shared/types';
+import type { Settings, KnowledgeBase, Document, Session, Message, ProviderConfig, SessionSummary } from '../shared/types';
 
 let userDataDir = '';
 let SQL: SqlJsStatic | null = null;
@@ -19,8 +19,10 @@ let db: Database | null = null;
 
 const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
-  chunkSize: 500,
-  chunkOverlap: 50,
+  // v1.2.1 起 chunkSize/chunkOverlap 单位从字符改为 token（cl100k_base）
+  // 800 tokens ≈ 600 中文字符 / 2400 英文字符；100 token overlap 约 12.5%
+  chunkSize: 800,
+  chunkOverlap: 100,
   topK: 5,
   citationScoreThreshold: 0.4,
   temperature: 0.7,
@@ -28,6 +30,10 @@ const DEFAULT_SETTINGS: Settings = {
   autoLaunch: false,
   enableOcr: false,
   enableBm25: true,
+  // 多轮查询改写（v1.2.2）：用小模型把指代 / 省略实词的 follow-up 改写为自包含 query
+  enableQueryRewrite: true,
+  // 长 session 周期摘要（v1.2.3）：每 20 turn 生成一次摘要存 DB，供后续注入 LLM 上下文
+  summaryTriggerTurns: 20,
   // Agentic RAG（v1.2.0）：默认关闭，老用户升级后行为不变
   enableAgent: false,
   agentMaxIterations: 4,
@@ -191,6 +197,17 @@ export async function initStorage(): Promise<void> {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+    CREATE TABLE IF NOT EXISTS session_summaries (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      start_msg_id TEXT NOT NULL,
+      end_msg_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      key_topics TEXT,
+      key_entities TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_summaries_session ON session_summaries(session_id, created_at DESC);
   `);
 
   // 初始化默认设置
@@ -509,6 +526,7 @@ export function touchSession(id: string, title?: string): void {
 
 export function deleteSession(id: string): void {
   prep('DELETE FROM sessions WHERE id = ?').run(id);
+  deleteSessionSummaries(id);
 }
 
 export function addMessage(m: Omit<Message, 'createdAt'>): void {
@@ -543,6 +561,82 @@ export function listMessages(sessionId: string): Message[] {
       createdAt: r.created_at,
     }),
   );
+}
+
+// ===== Session Summaries（v1.2.3）=====
+
+/** 写入一条摘要 */
+export function addSessionSummary(s: Omit<SessionSummary, 'createdAt'>): void {
+  prep(
+    `INSERT INTO session_summaries
+       (id, session_id, start_msg_id, end_msg_id, summary, key_topics, key_entities, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    s.id,
+    s.sessionId,
+    s.startMsgId,
+    s.endMsgId,
+    s.summary,
+    JSON.stringify(s.keyTopics ?? []),
+    JSON.stringify(s.keyEntities ?? []),
+    Date.now(),
+  );
+}
+
+/** 取某 session 最新一条摘要（用于判断"自上次以来又有多少新 turn"） */
+export function getLatestSessionSummary(sessionId: string): SessionSummary | null {
+  const r = prep(
+    `SELECT * FROM session_summaries WHERE session_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(sessionId) as any;
+  return r ? mapSummary(r) : null;
+}
+
+/** 列某 session 的所有摘要（按时间正序） */
+export function listSessionSummaries(sessionId: string, limit = 50): SessionSummary[] {
+  return (prep(
+    `SELECT * FROM session_summaries WHERE session_id = ?
+     ORDER BY created_at DESC LIMIT ?`,
+  ).all(sessionId, limit) as any[]).map(mapSummary).reverse();
+}
+
+/**
+ * 跨 session 搜摘要：按 query 关键词做 SQL LIKE 匹配。
+ * 简单但够用——本地 SQLite 表数据量小（一个 session 一辈子也就几十条摘要）。
+ * 关键词切分：取 query 里长度 ≥ 2 的 CJK / 字母数字串；任一关键词命中即可。
+ */
+export function searchSessionSummaries(query: string, limit = 3): SessionSummary[] {
+  const tokens = (query || '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 2)
+    .slice(0, 5); // 最多取 5 个关键词，避免 SQL 过长
+  if (tokens.length === 0) return [];
+  const like = tokens.map(() => 'summary LIKE ?').join(' OR ');
+  const params = tokens.map((t) => `%${t}%`);
+  return (prep(
+    `SELECT * FROM session_summaries
+     WHERE ${like}
+     ORDER BY created_at DESC LIMIT ?`,
+  ).all(...params, limit) as any[]).map(mapSummary);
+}
+
+/** 删除某 session 的全部摘要（删除 session 时调用） */
+export function deleteSessionSummaries(sessionId: string): void {
+  prep('DELETE FROM session_summaries WHERE session_id = ?').run(sessionId);
+}
+
+function mapSummary(r: any): SessionSummary {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    startMsgId: r.start_msg_id,
+    endMsgId: r.end_msg_id,
+    summary: r.summary,
+    keyTopics: r.key_topics ? JSON.parse(r.key_topics) : [],
+    keyEntities: r.key_entities ? JSON.parse(r.key_entities) : [],
+    createdAt: r.created_at,
+  };
 }
 
 export function closeStorage(): void {

@@ -284,8 +284,73 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 BM25 是经典词频检索，弥补上述短板，两路结果用 RRF 融合。
                 关闭后仅用向量检索。v1.1.6 之前的老文档会在下次启动时自动回填 BM25 索引。
               </div>
+              <Row label="查询改写 (v2.0.0)">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableQueryRewrite !== false}
+                    onChange={(e) =>
+                      setGeneral((g) => ({ ...g, enableQueryRewrite: e.target.checked }))
+                    }
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    多轮对话自动改写（消除指代、补全实体）
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                开启后，每条 user 消息在检索前会用小模型"改写"成自包含的查询——
+                把"哪一章？" / "它" / "刚才那个" 之类省略或指代的问题补全成
+                "《XX条例》第一条属于哪一章？"。命中率从可能低于 50% 提到 90% 以上。
+                关闭时直接用原始 query 检索（旧行为）。
+              </div>
+              <Row label="改写 Provider">
+                <select
+                  value={general.rewriterProviderId ?? ''}
+                  onChange={(e) =>
+                    setGeneral((g) => ({ ...g, rewriterProviderId: e.target.value }))
+                  }
+                  className="px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                >
+                  <option value="">（与 Chat 共用）</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </Row>
+              <Row label="改写模型">
+                <input
+                  placeholder="（空 = 走该 Provider 的 Chat 模型）"
+                  value={general.rewriterModel ?? ''}
+                  onChange={(e) => setGeneral((g) => ({ ...g, rewriterModel: e.target.value }))}
+                  className="w-64 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                />
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                推荐用一个<strong>快、便宜</strong>的小模型做改写即可（如 Qwen-Turbo / GPT-4o-mini / DeepSeek-Chat），
+                改写任务不需要大模型。每条 user 消息多一次非流式 LLM 调用（100-500ms / 100-300 token）。
+              </div>
+              <Row label="周期摘要 (v2.0.0)">
+                <input
+                  type="number"
+                  min={0}
+                  max={200}
+                  value={general.summaryTriggerTurns ?? 20}
+                  onChange={(e) =>
+                    setGeneral((g) => ({ ...g, summaryTriggerTurns: +e.target.value }))
+                  }
+                  className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                />
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                长 session 每 N turn（user 消息数）自动生成一次摘要存 SQLite，供后续轮检索历史对话。
+                设为 0 关闭。摘要生成走改写模型（便宜），失败不影响主流程。
+                <strong>注意</strong>：摘要不嵌向量库——本版本用 SQL LIKE 简单搜，本地单库数据量小够用。
+              </div>
 
-              <Row label="Agent 模式 (v1.2.0)">
+              <Row label="Agent 模式 (v2.0.0)">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -379,22 +444,22 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                   独立验证 OCR 管线（不依赖 PDF）
                 </span>
               </div>
-              <Row label="Chunk Size">
+              <Row label="Chunk Size (tokens)">
                 <input
                   type="number"
                   min={100}
-                  max={2000}
-                  value={general.chunkSize ?? 500}
+                  max={4000}
+                  value={general.chunkSize ?? 800}
                   onChange={(e) => setGeneral((g) => ({ ...g, chunkSize: +e.target.value }))}
                   className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 />
               </Row>
-              <Row label="Chunk Overlap">
+              <Row label="Chunk Overlap (tokens)">
                 <input
                   type="number"
                   min={0}
-                  max={500}
-                  value={general.chunkOverlap ?? 50}
+                  max={1000}
+                  value={general.chunkOverlap ?? 100}
                   onChange={(e) => setGeneral((g) => ({ ...g, chunkOverlap: +e.target.value }))}
                   className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 />

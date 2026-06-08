@@ -55,6 +55,26 @@ export interface Session {
   messageCount: number;
 }
 
+/**
+ * 对话摘要（v1.2.3）：长 session 每 N 轮生成一次，存 SQLite 供后续轮注入 LLM 上下文。
+ * 不嵌向量库——本地 SQLite 全文 LIKE 检索够用，避免再加一路融合。
+ */
+export interface SessionSummary {
+  id: string;
+  sessionId: string;
+  /** 本段摘要覆盖的起始 msg id（包含）；用于增量判断"自上次摘要以来又有多少新消息" */
+  startMsgId: string;
+  /** 本段摘要覆盖的结束 msg id（包含） */
+  endMsgId: string;
+  /** 摘要正文（200-400 字中文） */
+  summary: string;
+  /** 关键主题（JSON 数组：["条例", "第一章", "总则"]） */
+  keyTopics: string[];
+  /** 关键实体（JSON 数组：[{type, value}]，type ∈ regulation/person/file/term） */
+  keyEntities: Array<{ type: string; value: string }>;
+  createdAt: number;
+}
+
 export interface ProviderConfig {
   id: string;
   label: string;
@@ -148,6 +168,16 @@ export interface Settings {
    *  - BM25 擅长精确术语（错误码、API 名、专有名词）
    *  关闭时退化为纯向量检索 */
   enableBm25?: boolean;
+  /** 多轮对话查询改写（v1.2.2）：用小模型把指代 / 省略实词的 follow-up 问题
+   *  改写成自包含的检索 query（如 "哪一章？" → "《XX条例》第一条属于哪一章？"）。
+   *  关闭时退化为原始 query 直搜。默认开启。 */
+  enableQueryRewrite?: boolean;
+  /** 改写模型所属 Provider（用于 chatCompletion 调用）。空则用 Chat Provider。 */
+  rewriterProviderId?: string;
+  /** 改写模型名。空则用该 Provider 的 chatModel。 */
+  rewriterModel?: string;
+  /** v1.2.3 长 session 周期摘要触发：自上次摘要以来新增的 user turn 数 ≥ 此值时生成一次摘要。默认 20。0 关闭。 */
+  summaryTriggerTurns?: number;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;

@@ -128,7 +128,9 @@ export const DEFAULT_TOP_K = 5;
 
 // 应用名称
 export const APP_NAME = 'LocalRAG';
-export const APP_VERSION = '1.2.0';
+// v2.0.0 统一对外版本号。v1.2.0/1/2/3 是本次发布的 4 个内部特性里程碑
+// （Agentic RAG / 智能切分 / 查询改写 / 长会话上下文），仍保留在代码注释与开发历史中
+export const APP_VERSION = '2.0.0';
 
 // Provider 预设
 export const PROVIDER_PRESETS = {
