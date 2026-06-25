@@ -171,10 +171,14 @@ export async function hybridSearch(
   topK: number,
   options: { enableBm25?: boolean } = {},
 ): Promise<SearchHit[]> {
-  // 召回更多候选，让 RRF 融合后阈值过滤有意义。fetchK=4×topK 是个折衷：
-  // 太小（2×）→ 候选都是各自 top-N，归一化后都过线，阈值等于失效
-  // 太大（10×）→ 召回 + 融合成本上升
-  const fetchK = topK * 4;
+  // v1.2.9：召回更多候选，让 RRF 融合后阈值过滤有意义。
+  // fetchK = max(50, 10×topK)：
+  //   太小（2×）→ 候选都是各自 top-N，归一化后都过线，阈值等于失效
+  //   太大（10×）→ 召回 + 融合成本上升
+  //   v1.2.9 加大到 10×（并兜底 50）——用户实测：BM25 rank=12 的正确答案在
+  //   4×topK=20 候选内能进，但 vec 排名靠后的 chunk 需要更大候选才能在
+  //   RRF 融合里把正确答案抬到 topK 内。
+  const fetchK = Math.max(50, topK * 10);
   const enableBm25 = options.enableBm25 !== false;
 
   // 两路并发
@@ -185,7 +189,11 @@ export async function hybridSearch(
       : Promise.resolve([] as Array<{ id: string; score: number }>),
   ]);
 
-  const RRF_K = 60;
+  // v1.2.9：RRF_K 60→30——让 BM25/vec 低 rank chunk 的 RRF 贡献不被压太狠。
+  // rank=1 → 1/31=0.0323，rank=12 → 1/42=0.0238（差距 1.36×，原 K=60 是 1.18×）。
+  // 用户实测：BM25 rank=12 答案在 K=60 时被前 8 个整章 chunk 顶到第 6，
+  // K=30 后低 rank 贡献相对提升，RRF 排名整体上移。
+  const RRF_K = 30;
   const fused = new Map<string, { hit: SearchHit; rrf: number }>();
 
   // 向量路：vecHits 已按 score 降序，rank 即数组下标
@@ -262,7 +270,7 @@ export async function hybridSearch(
 }
 
 /**
- * 跨 KB 检索：每个 KB 并发调 hybridSearch（每路 fetchK=topK*3 留融合余量），
+ * 跨 KB 检索：每个 KB 并发调 hybridSearch（每路 fetchK=max(50, topK*8) 留融合余量），
  * 用 docId|chunkIndex 做 key 全局 RRF 融合，输出 score 仍归一化到 [0,1]。
  *
  * - 单 KB 时直接走 hybridSearch 走 fastpath，省一层融合
@@ -282,13 +290,80 @@ export async function hybridSearchMulti(
     return hybridSearch(kbIds[0], queryText, queryVec, topK, options);
   }
 
-  const fetchK = topK * 3;
+  // v1.2.9：多 KB 时每路 fetchK=max(50, 8×topK)——比单 KB 略小（多 KB 总候选已经放大）
+  const fetchK = Math.max(50, topK * 8);
   // 任一 KB 检索失败不阻塞其他 KB
   const settled = await Promise.allSettled(
     kbIds.map((id) => hybridSearch(id, queryText, queryVec, fetchK, options)),
   );
 
-  const RRF_K = 60;
+  // v1.2.9：RRF_K 与单 KB 同步 60→30
+  const RRF_K = 30;
+  const NORMALIZER = (RRF_K + 1) / 2;
+  const fused = new Map<string, { hit: SearchHit; rrf: number }>();
+
+  settled.forEach((res) => {
+    if (res.status !== 'fulfilled') return;
+    const hits = res.value;
+    hits.forEach((h, rank) => {
+      const key = h.docId + '|' + h.chunkIndex;
+      const rrf = 1 / (RRF_K + rank + 1);
+      const existing = fused.get(key);
+      if (existing) {
+        existing.rrf += rrf;
+      } else {
+        fused.set(key, { hit: h, rrf });
+      }
+    });
+  });
+
+  return Array.from(fused.values())
+    .sort((a, b) => b.rrf - a.rrf)
+    .slice(0, topK)
+    .map((f) => ({ ...f.hit, score: f.rrf * NORMALIZER }));
+}
+
+/**
+ * 多 query 混合检索（v1.3.0）：接受 N 条改写后的 query + N 个已 embed 的 vec，
+ * 对单 KB 并发跑 hybridSearch，再用 RRF 全局融合。
+ *
+ * 与 `hybridSearchMulti` 跨 KB 检索结构同构（key = docId|chunkIndex，每路 rank 独立算 RRF 贡献），
+ * 区别仅在于输入是「多 query」而非「多 KB」。可与 hybridSearchMulti 嵌套（多 KB + 多 query），
+ * 那是 Agent 模式的潜在扩展（v1.3.0 暂未用）。
+ *
+ * fetchK 选择：`max(50, 8 * topK)`——与 hybridSearchMulti 保持一致，每路有足够候选让
+ * RRF 融合有意义（不因 topK 太小把正确答案切掉）。
+ *
+ * @param queryTexts 改写/扩展后的 query（来自 query-rewriter 的 `plan.searchQueries`）
+ * @param queryVecs  与 queryTexts 一一对应的预 embed 向量（由调用方负责 embed，避免重复计算）
+ */
+export async function hybridSearchMultiQuery(
+  kbId: string,
+  queryTexts: string[],
+  queryVecs: number[][],
+  topK: number,
+  options: { enableBm25?: boolean } = {},
+): Promise<SearchHit[]> {
+  if (queryTexts.length === 0) return [];
+  if (queryTexts.length !== queryVecs.length) {
+    console.warn(
+      `[hybridSearchMultiQuery] queryTexts(${queryTexts.length}) 与 queryVecs(${queryVecs.length}) 长度不一致，使用较短者`,
+    );
+  }
+  // 单 query 退化为 hybridSearch 走 fastpath（与 hybridSearchMulti 单 KB 走 fastpath 一致）
+  if (queryTexts.length === 1) {
+    return hybridSearch(kbId, queryTexts[0], queryVecs[0], topK, options);
+  }
+
+  // v1.3.0：每路 fetchK=max(50, 8×topK)——与 hybridSearchMulti 同步
+  const fetchK = Math.max(50, topK * 8);
+  // 任一 query 检索失败不阻塞其他 query（与 hybridSearchMulti 一致）
+  const settled = await Promise.allSettled(
+    queryTexts.map((q, i) => hybridSearch(kbId, q, queryVecs[i], fetchK, options)),
+  );
+
+  // v1.2.9 RRF_K 60→30——与 hybridSearch / hybridSearchMulti 同步
+  const RRF_K = 30;
   const NORMALIZER = (RRF_K + 1) / 2;
   const fused = new Map<string, { hit: SearchHit; rrf: number }>();
 

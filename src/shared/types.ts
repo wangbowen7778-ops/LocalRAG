@@ -168,14 +168,36 @@ export interface Settings {
    *  - BM25 擅长精确术语（错误码、API 名、专有名词）
    *  关闭时退化为纯向量检索 */
   enableBm25?: boolean;
-  /** 多轮对话查询改写（v1.2.2）：用小模型把指代 / 省略实词的 follow-up 问题
-   *  改写成自包含的检索 query（如 "哪一章？" → "《XX条例》第一条属于哪一章？"）。
-   *  关闭时退化为原始 query 直搜。默认开启。 */
+  /** v1.2.2 query rewrite 字段（v1.2.4 已删除，保留字段定义以兼容老 DB JSON） */
   enableQueryRewrite?: boolean;
-  /** 改写模型所属 Provider（用于 chatCompletion 调用）。空则用 Chat Provider。 */
+  /** v1.2.2 query rewrite 字段（v1.2.4 已删除） */
   rewriterProviderId?: string;
-  /** 改写模型名。空则用该 Provider 的 chatModel。 */
+  /** v1.2.2 query rewrite 字段（v1.2.4 已删除） */
   rewriterModel?: string;
+  /** v1.2.4：是否启用 read_chunk 工具（simple 模式）。默认开启。
+   *  - true：检索 topK chunk 后只把"索引 + preview"发到 LLM context，LLM 按需调 read_chunk(chunk_id) 拉完整内容。
+   *         节省 ~60-80% chunk 相关 token。
+   *  - false：退回老行为，把 topK 全文发到 LLM context（适合 Provider 不支持 function_calling 的情况）。
+   *  仅对简单模式生效。Agent 模式永远使用 read_chunk（v1.2.4 统一）。 */
+  enableReadChunkTool?: boolean;
+  /** v1.3.0 查询理解管线（query-rewriter）：默认开启。
+   *  - true：每条 user 消息在检索前先调 LLM 把 raw query 改写/扩展/分解为 1-3 条可检索 query，
+   *         多 query 走 RRF 融合后喂给向量库（hybridSearchMultiQuery）。解决 v1.2.6 之前
+   *         「口语化/短 query/多意图 query 召回差」的问题。
+   *  - false：退化为 v1.2.6 行为（单 query → hybridSearch，跳过改写）。
+   *  简单模式 + Agent 模式都受益。失败时（缺 key / LLM 抛错）自动 fallback 到原 query。 */
+  enableQueryRewriter?: boolean;
+  /** v1.3.0 自定义 rewriter 用 Provider；空则走 Chat Provider（v1.2.2 query rewrite 字段同档）
+   *  改写 LLM 可独立配置便宜模型（如 Qwen-Turbo / gpt-4o-mini），主答继续用 GPT-4 / DeepSeek-Reasoner */
+  queryRewriterProviderId?: string;
+  /** v1.3.0 自定义 rewriter 用 Model；空则走 Chat Provider 的 chatModel */
+  queryRewriterModel?: string;
+  /** v1.3.2 检索后 LLM rerank：默认开启。
+   *  - true：检索召回 20 个候选 → Chat Provider 小 LLM 按语义相关度重排 → 取 topK 喂主答 LLM。
+   *         解决「正确答案被 BM25/RRF 排到 topK 外」（长整章 chunk 关键词堆砌压过答案子 chunk）。
+   *  - false：退化为 RRF 原顺序。
+   *  简单模式 + Agent 模式都受益。Agent 模式每次 search_kb 多 1 次 LLM 调用。失败时自动回退原顺序。 */
+  enableRerank?: boolean;
   /** v1.2.3 长 session 周期摘要触发：自上次摘要以来新增的 user turn 数 ≥ 此值时生成一次摘要。默认 20。0 关闭。 */
   summaryTriggerTurns?: number;
   chunkSize: number;

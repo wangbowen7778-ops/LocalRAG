@@ -56,9 +56,9 @@ export function MessageBubble({
         {citations && citations.length > 0 && !isUser && (
           <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-600 text-xs">
             <div className="font-semibold text-slate-500 mb-1">引用来源</div>
-            <ol className="list-decimal pl-4 space-y-1">
+            <ol className="list-decimal pl-4 space-y-1 max-h-40 overflow-auto">
               {citations.map((c, i) => (
-                <li key={i} className="text-slate-600 dark:text-slate-300">
+                <li key={i} className="text-slate-600 dark:text-slate-300 whitespace-pre-wrap">
                   <span className="text-primary-500">{c.filename}</span> · {c.chunk}
                 </li>
               ))}

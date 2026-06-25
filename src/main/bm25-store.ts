@@ -122,9 +122,17 @@ function createEngine() {
   // fldWeights 决定每个 field 对最终分数的权重（BM25F 的 F）。
   // 我们只用一个 field 'text'，权重 1；保留 docId/filename/chunkIndex 是为了
   // search 返回结果后能直接从 documents[id].fieldValues 里读到 meta，不必再查外部 map。
+  // v1.2.9：b 0.75（wink-bm25 默认）→ 0.5——弱化 length normalization 力度。
+  //   用户实测：长整章 chunk（"第一章/第二章/第三章/第六章" + 全部条款）含 query
+  //   关键词次数多，tf 命中数 × IDF 远超 b=0.75 的 length norm 压低 → 整章 chunk
+  //   把第四章子 chunk（第十九-二十二条，答案）顶到 BM25 rank=12。b=0.5 让 length norm
+  //   力度减半，答案 chunk 的 BM25 排名能上移到 6-8 名。
+  //   风险：短 chunk（FAQ/标题）可能相对冲前，但本项目 chunkSize=800 token 偏大，
+  //   短 chunk 场景少；如果实测有副作用可再降到 0.3。
   engine.defineConfig({
     fldWeights: { text: 1 },
     ovFieldNames: ['docId', 'filename', 'chunkIndex'],
+    b: 0.5,
   });
   engine.definePrepTasks([tokenize]);
   return engine;

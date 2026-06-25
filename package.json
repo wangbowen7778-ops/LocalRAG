@@ -1,6 +1,6 @@
 {
   "name": "localrag",
-  "version": "2.0.0",
+  "version": "1.3.6",
   "description": "LocalRAG - 本地知识库 RAG 桌面应用",
   "main": "dist/main/main.js",
   "author": "LocalRAG Team",

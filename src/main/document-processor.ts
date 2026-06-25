@@ -580,21 +580,19 @@ export async function resolveEmbeddingProvider() {
 }
 
 /**
- * 根据设置选取可用于"查询改写"的 Provider + 模型（v1.2.2）。
- * - 优先用 rewriterProviderId；为空则回退到 defaultProviderId / 第一个
- * - 模型：rewriterModel 非空则用之；否则用该 Provider 的 chatModel
- * - 改写本质是一次非流式 chatCompletion，Provider 必须支持 chat 接口
+ * 根据设置选取可用于"会话摘要生成 / history 中段压缩"的 Provider + 模型（v1.2.3 + v1.2.4）。
+ * - 用 defaultProviderId；为空则取第一个
+ * - 模型：直接用该 Provider 的 chatModel（v1.2.4 不再支持独立指定 summary 模型，复用 Chat 模型）
+ * - 本质是一次非流式 chatCompletion，Provider 必须支持 chat 接口
  */
-export function resolveRewriterProvider(
+export function resolveSummaryProvider(
   settings: ReturnType<typeof getSettings>,
 ): { provider: ProviderConfig; model: string } {
   const providers = listProviders();
-  let provider = providers.find((p) => p.id === settings.rewriterProviderId);
-  if (!provider) provider = providers.find((p) => p.id === settings.defaultProviderId);
+  let provider = providers.find((p) => p.id === settings.defaultProviderId);
   if (!provider) provider = providers[0];
   if (!provider) throw new Error('尚未配置任何 AI Provider');
-  const model = (settings.rewriterModel ?? '').trim() || provider.chatModel;
-  return { provider, model };
+  return { provider, model: provider.chatModel };
 }
 
 /** 删除某文档的所有向量 */

@@ -23,22 +23,31 @@ const DEFAULT_SETTINGS: Settings = {
   // 800 tokens ≈ 600 中文字符 / 2400 英文字符；100 token overlap 约 12.5%
   chunkSize: 800,
   chunkOverlap: 100,
-  topK: 5,
+  // v1.2.9: topK 默认 5→8——配合 fetchK 扩召回 + RRF_K 60→30，
+  // 让 BM25 rank 较后但两路都命中的 chunk 不被 topK 切掉（用户实测：
+  // 第四章 chunk 7 BM25 rank=12、RRF 融合后第 6 名、topK=5 卡掉）。
+  topK: 8,
   citationScoreThreshold: 0.4,
   temperature: 0.7,
   language: 'zh-CN',
   autoLaunch: false,
   enableOcr: false,
   enableBm25: true,
-  // 多轮查询改写（v1.2.2）：用小模型把指代 / 省略实词的 follow-up 改写为自包含 query
-  enableQueryRewrite: true,
-  // 长 session 周期摘要（v1.2.3）：每 20 turn 生成一次摘要存 DB，供后续注入 LLM 上下文
+  // v1.2.4：启用 read_chunk 工具（简单模式）。默认开启，节省 ~60-80% chunk 相关 token。
+  // 关闭时退回老行为（topK 全文塞 LLM context），适合 Provider 不支持 function_calling 的情况。
+  enableReadChunkTool: true,
+  // 长 session 周期摘要（v1.2.3）：每 20 turn 生成一次摘要存 DB，供跨 session 召回使用。
+  // session 内 history 截断由 context-builder.ts 智能处理（v1.2.4），不再依赖硬 slice。
   summaryTriggerTurns: 20,
   // Agentic RAG（v1.2.0）：默认关闭，老用户升级后行为不变
   enableAgent: false,
   agentMaxIterations: 4,
   enableKBSelector: true,
   agentTopKPerQuery: 5,
+  // v1.3.0 查询理解管线（query-rewriter）：默认开启，老用户升级自动受益
+  enableQueryRewriter: true,
+  // v1.3.2 检索后 LLM rerank：默认开启，把语义最相关的 chunk 抬到 topK 前
+  enableRerank: true,
 };
 
 // ===== 基础工具 =====

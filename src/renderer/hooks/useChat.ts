@@ -75,6 +75,24 @@ export function useChat(kbId: string | null) {
     api.listMessages(activeSession.id).then(setMessages).catch(() => setMessages([]));
   }, [activeSession]);
 
+  // 记录当前正在流式的 sessionId——用于切会话时判断是否要清流式态。
+  // streaming 是 useChat 局部 state，切会话不重挂载；若不处理，切走正在流式的会话后
+  // 新会话会继承 streaming=true → 输入框禁用 + 显示等待气泡（"其他对话也显示等待"）。
+  const streamingSessionRef = useRef<string | null>(null);
+
+  // 切会话时：若切到的不是正在流式的会话，清流式态（新会话干净）。
+  // 切回正在流式的会话时不动——事件订阅按 sessionId 过滤，token/done 仍会续上，不丢内容。
+  useEffect(() => {
+    const streamingSid = streamingSessionRef.current;
+    if (streamingSid && activeSession?.id !== streamingSid) {
+      setStreaming(false);
+      setStreamingText('');
+      setStreamingCitations([]);
+      setStreamingTrace(null);
+      setStreamingPhase('');
+    }
+  }, [activeSession]);
+
   // 卸载时清理订阅
   useEffect(() => {
     return () => {
@@ -126,6 +144,7 @@ export function useChat(kbId: string | null) {
 
       // 2) 进入流式态
       setStreaming(true);
+      streamingSessionRef.current = currentSession?.id ?? null;
       setStreamingText('');
       setStreamingCitations([]);
       setStreamingTrace(null);
@@ -198,6 +217,7 @@ export function useChat(kbId: string | null) {
           const sess = activeSessionRef.current;
           if (sess && e.sessionId !== sess.id) return;
           setStreaming(false);
+          streamingSessionRef.current = null;
           setStreamingText('');
           setStreamingCitations([]);
           setStreamingTrace(null);
@@ -230,6 +250,7 @@ export function useChat(kbId: string | null) {
       } catch (e: any) {
         sendingRef.current = false;
         setStreaming(false);
+        streamingSessionRef.current = null;
         setStreamingText('');
         setStreamingCitations([]);
         setStreamingTrace(null);

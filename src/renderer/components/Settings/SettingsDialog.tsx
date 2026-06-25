@@ -284,31 +284,51 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 BM25 是经典词频检索，弥补上述短板，两路结果用 RRF 融合。
                 关闭后仅用向量检索。v1.1.6 之前的老文档会在下次启动时自动回填 BM25 索引。
               </div>
-              <Row label="查询改写 (v2.0.0)">
+              <Row label="按需读片段 (v1.2.4)">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={general.enableQueryRewrite !== false}
+                    checked={general.enableReadChunkTool !== false}
                     onChange={(e) =>
-                      setGeneral((g) => ({ ...g, enableQueryRewrite: e.target.checked }))
+                      setGeneral((g) => ({ ...g, enableReadChunkTool: e.target.checked }))
                     }
                   />
                   <span className="text-xs text-slate-600 dark:text-slate-300">
-                    多轮对话自动改写（消除指代、补全实体）
+                    检索后只把片段索引发到 LLM，LLM 按需调 read_chunk 工具取完整内容
                   </span>
                 </label>
               </Row>
               <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
-                开启后，每条 user 消息在检索前会用小模型"改写"成自包含的查询——
-                把"哪一章？" / "它" / "刚才那个" 之类省略或指代的问题补全成
-                "《XX条例》第一条属于哪一章？"。命中率从可能低于 50% 提到 90% 以上。
-                关闭时直接用原始 query 检索（旧行为）。
+                开启后，每条 user 消息在检索后只把 topK 片段的【索引 + preview + score】发到 LLM context，
+                LLM 通过 read_chunk(chunk_id) 工具按需拉取完整内容。chunk 相关 token 节省 60-80%。
+                关闭时退回老行为——把 topK 全文发到 LLM context（适合 Provider 不支持 function_calling 的情况）。
+                Agent 模式不受此设置影响（Agent 永远使用 read_chunk）。
+              </div>
+              <Row label="查询改写 / 扩展 (v1.3.0)">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableQueryRewriter !== false}
+                    onChange={(e) =>
+                      setGeneral((g) => ({ ...g, enableQueryRewriter: e.target.checked }))
+                    }
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    检索前用 LLM 把用户 query 改写/扩展/分解为 1-3 条
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                开启后，每条 user 消息在检索前先调一个小 LLM，把口语化 / 模糊 / 短 / 多意图 query
+                翻译为 1-3 条高质量可检索 query（指代→实体 / 模糊→扩展同义 / 多意图→分解），
+                多 query 走 RRF 融合后喂给向量库。简单模式 + Agent 模式都受益。
+                关闭时退回 v1.2.6 行为（单条原 query 直接进 hybridSearch）。失败时自动 fallback 到原 query。
               </div>
               <Row label="改写 Provider">
                 <select
-                  value={general.rewriterProviderId ?? ''}
+                  value={general.queryRewriterProviderId ?? ''}
                   onChange={(e) =>
-                    setGeneral((g) => ({ ...g, rewriterProviderId: e.target.value }))
+                    setGeneral((g) => ({ ...g, queryRewriterProviderId: e.target.value }))
                   }
                   className="px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 >
@@ -322,17 +342,38 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
               </Row>
               <Row label="改写模型">
                 <input
-                  placeholder="（空 = 走该 Provider 的 Chat 模型）"
-                  value={general.rewriterModel ?? ''}
-                  onChange={(e) => setGeneral((g) => ({ ...g, rewriterModel: e.target.value }))}
-                  className="w-64 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
+                  placeholder="留空用 Chat Provider 的 chatModel"
+                  value={general.queryRewriterModel ?? ''}
+                  onChange={(e) =>
+                    setGeneral((g) => ({ ...g, queryRewriterModel: e.target.value }))
+                  }
+                  className="w-48 px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 />
               </Row>
               <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
-                推荐用一个<strong>快、便宜</strong>的小模型做改写即可（如 Qwen-Turbo / GPT-4o-mini / DeepSeek-Chat），
-                改写任务不需要大模型。每条 user 消息多一次非流式 LLM 调用（100-500ms / 100-300 token）。
+                改写 LLM 可独立配置便宜模型（如 Qwen-Turbo / gpt-4o-mini），主答继续用 GPT-4 / DeepSeek-Reasoner。
+                改写任务简单（~300-500 token，温度 0.1），无需用主答同款模型。
               </div>
-              <Row label="周期摘要 (v2.0.0)">
+              <Row label="检索结果重排 (v1.3.2)">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={general.enableRerank !== false}
+                    onChange={(e) =>
+                      setGeneral((g) => ({ ...g, enableRerank: e.target.checked }))
+                    }
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    检索后用 LLM 按语义相关度重排候选
+                  </span>
+                </label>
+              </Row>
+              <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
+                开启后，检索召回 20 个候选片段，用 Chat Provider 的小 LLM 按语义相关度重排，取 topK 喂给主答 LLM。
+                解决「正确答案被 BM25 排到 topK 外」（长整章 chunk 关键词堆砌压过答案子 chunk）。简单模式 + Agent 模式都受益。
+                Agent 模式每次检索多 1 次 LLM 调用。失败时自动回退 RRF 原顺序。
+              </div>
+              <Row label="周期摘要 (v1.2.3)">
                 <input
                   type="number"
                   min={0}
@@ -345,9 +386,10 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                 />
               </Row>
               <div className="text-xs text-slate-500 -mt-1 px-1 leading-relaxed">
-                长 session 每 N turn（user 消息数）自动生成一次摘要存 SQLite，供后续轮检索历史对话。
-                设为 0 关闭。摘要生成走改写模型（便宜），失败不影响主流程。
-                <strong>注意</strong>：摘要不嵌向量库——本版本用 SQL LIKE 简单搜，本地单库数据量小够用。
+                长 session 每 N turn（user 消息数）自动生成一次跨 session 摘要存 SQLite，供后续会话检索"我们之前聊过 X 吗"。
+                设为 0 关闭。摘要生成复用 Chat 模型，失败不影响主流程。
+                <strong>注意</strong>：v1.2.4 起 intra-session 不再需要周期摘要（context-builder 智能截断会兜底），
+                此设置仅控制跨 session 长程记忆的写入节奏。
               </div>
 
               <Row label="Agent 模式 (v2.0.0)">
@@ -469,7 +511,7 @@ export function SettingsDialog({ open, onClose, providers, settings, onSave }: P
                   type="number"
                   min={1}
                   max={20}
-                  value={general.topK ?? 5}
+                  value={general.topK ?? 8}
                   onChange={(e) => setGeneral((g) => ({ ...g, topK: +e.target.value }))}
                   className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-surface-dark"
                 />
